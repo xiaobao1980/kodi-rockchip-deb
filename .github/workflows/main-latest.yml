@@ -1,7 +1,13 @@
 name: main-latest
 
+# xiaobao: 2026-07 修复说明
+#  1) set-output 已被 GitHub 禁用（会直接失败），改为 $GITHUB_OUTPUT
+#  2) matrix 只保留 trixie（RK3568 目标系统），forky 需要时取消注释
+#  3) ghcr 容器镜像推送改为 continue-on-error，失败不阻塞 deb 发布
+#  4) release 换用维护中的 softprops/action-gh-release（原 action 基于 node12 已被淘汰）
+
 on:
-  workflow_dispatch: # https://github.com/armsurvivors/kodi-rockchip-deb/actions/workflows/main-latest.yml
+  workflow_dispatch: # Actions 页面手动触发
   #push:
   #  branches: [ main ]
 
@@ -16,8 +22,7 @@ jobs:
     steps:
       - name: Prepare release ID
         id: prep
-        run: |
-          echo ::set-output name=created::$(date -u +'%Y%m%d-%H%M')
+        run: echo "created=$(date -u +'%Y%m%d-%H%M')" >> "$GITHUB_OUTPUT"
     outputs:
       created: ${{ steps.prep.outputs.created }} # refer to as ${{needs.prepare.outputs.created}}
 
@@ -31,7 +36,7 @@ jobs:
         distro:
           #- { id: 'bookworm', image: 'debian:bookworm' }
           - { id: 'trixie', image: 'debian:trixie' }
-          - { id: 'forky', image: 'debian:forky' }
+          #- { id: 'forky', image: 'debian:forky' }
         ffmpeg:
           #- { branch: '7.1', id: '71' }
           #- { branch: '8.0', id: '80' }
@@ -50,7 +55,7 @@ jobs:
 
       - name: Build ${{ matrix.arch.name }} ${{ matrix.distro.id }}
         uses: docker/build-push-action@v7
-        timeout-minutes: 180
+        timeout-minutes: 300
         with:
           context: .
           file: ./Dockerfile
@@ -59,8 +64,8 @@ jobs:
           pull: true # bring in updated versions of preexisting GH images
           push: false
           tags: kodi-rockchip-gbm:${{ matrix.arch.name }}
-          #cache-from: type=gha,scope=${{ matrix.arch.name }}_${{ matrix.distro.id }}
-          #cache-to: type=gha,scope=${{ matrix.arch.name }}_${{ matrix.distro.id }},mode=max # mode=max "export all the layers of all intermediate steps"
+          cache-from: type=gha,scope=${{ matrix.arch.name }}_${{ matrix.distro.id }}
+          cache-to: type=gha,scope=${{ matrix.arch.name }}_${{ matrix.distro.id }},mode=max # mode=max "export all the layers of all intermediate steps"
           build-args: |
             PACKAGE_VERSION=${{needs.prepare.outputs.created}}
             BASE_IMAGE=${{ matrix.distro.image }}
@@ -79,6 +84,7 @@ jobs:
       # Login to ghcr.io to push the container image
       - name: Login to ghcr.io
         uses: docker/login-action@v4
+        continue-on-error: true
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -86,6 +92,7 @@ jobs:
 
       - name: Build ${{ matrix.arch.name }} ${{ matrix.distro.id }} (container image)
         uses: docker/build-push-action@v7
+        continue-on-error: true # 容器镜像只是附赠品，失败不影响 deb
         timeout-minutes: 30
         with:
           target: containerized-kodi # floating stage in the Dockerfile
@@ -120,12 +127,11 @@ jobs:
           ls -lahtR
 
       # Release the artifacts into GitHub Releases
-      - name: "GH specific release"
-        uses: "marvinpinto/action-automatic-releases@latest"
+      - name: "GH Release with deb"
+        uses: softprops/action-gh-release@v2
         with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: "${{needs.prepare.outputs.created}}"
+          tag_name: "${{needs.prepare.outputs.created}}"
+          name: "kodi-rockchip-gbm ${{needs.prepare.outputs.created}} (trixie, ffmpeg 8.1, pvr)"
           prerelease: false
-          title: "${{needs.prepare.outputs.created}}"
           files: |
             out/*.deb
