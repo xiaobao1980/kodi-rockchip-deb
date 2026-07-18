@@ -1,5 +1,6 @@
 # Warning to the reader. This produces a .deb package with stuff in /usr/local. If this scares you, stop reading.
 # It is in fact, non-debian packaging. Probably fpm would be a better choice?
+# xiaobao: 2026-07 新增 pvr.iptvsimple（IPTV Simple Client 直播插件）构建
 ARG BASE_IMAGE="debian:trixie"
 FROM ${BASE_IMAGE} AS packager
 
@@ -115,6 +116,16 @@ WORKDIR /src/screensaver.shadertoy/build
 RUN cmake -DADDONS_TO_BUILD=screensaver.shadertoy -DADDON_SRC_PREFIX=../.. -DCMAKE_INSTALL_PREFIX=/usr/local/share/kodi/addons -DCMAKE_BUILD_TYPE=Release -DPACKAGE_ZIP=1 /src/kodi/cmake/addons
 RUN make
 
+# xiaobao: Lets build & install the PVR IPTV Simple Client addon (直播源 PVR 插件)
+# 分支须与 Kodi 版本对应：kodi master == Piers (v22) 时期用 Piers 分支
+ARG PVR_IPTVSIMPLE_BRANCH="Piers"
+WORKDIR /src
+RUN git -c advice.detachedHead=false clone --branch "${PVR_IPTVSIMPLE_BRANCH}" --depth=1 https://github.com/kodi-pvr/pvr.iptvsimple.git
+WORKDIR /src/pvr.iptvsimple/build
+RUN cmake -DADDONS_TO_BUILD=pvr.iptvsimple -DADDON_SRC_PREFIX=../.. -DCMAKE_INSTALL_PREFIX=/usr/local/share/kodi/addons -DCMAKE_BUILD_TYPE=Release -DPACKAGE_ZIP=1 /src/kodi/cmake/addons && \
+    make -j$(nproc) && \
+    ls -lah /usr/local/share/kodi/addons/pvr.iptvsimple
+
 # Lets preinstall the Jellyfin Kodi repository add-on, just for convenience
 WORKDIR /usr/local/share/kodi/addons
 RUN wget "https://kodi.jellyfin.org/repository.jellyfin.kodi.zip"
@@ -149,9 +160,9 @@ RUN echo "Architecture: ${OS_ARCH}" >> /pkg/src/debian/control
 # Create the Changelog, fake. ARG here invalidates the cache.
 ARG PACKAGE_VERSION="20260513"
 ARG FFMPEG_ID="81"
-RUN echo "kodi-rockchip-gbm (${PACKAGE_VERSION}-kodi-${KODI_BRANCH}-ffmpeg-${FFMPEG_ID}) stable; urgency=medium" >> /pkg/src/debian/changelog && \
+RUN echo "kodi-rockchip-gbm (${PACKAGE_VERSION}-kodi-${KODI_BRANCH}-ffmpeg-${FFMPEG_ID}-pvr) stable; urgency=medium" >> /pkg/src/debian/changelog && \
     echo "" >> /pkg/src/debian/changelog && \
-    echo "  * Not a real changelog. Sorry." >> /pkg/src/debian/changelog && \
+    echo "  * Not a real changelog. Sorry. Includes pvr.iptvsimple." >> /pkg/src/debian/changelog && \
     echo "" >> /pkg/src/debian/changelog && \
     echo " -- Ricardo Pardini <ricardo@pardini.net>  Wed, 15 Sep 2021 14:18:33 +0200" >> /pkg/src/debian/changelog && \
     cat /pkg/src/debian/changelog
@@ -168,7 +179,7 @@ RUN file /pkg/*.deb && \
 
 # Now prepare the real output: the .deb for this release and arch.
 WORKDIR /artifacts
-RUN cp -v /pkg/*.deb kodi-rockchip-gbm_${OS_ARCH}_kodi_${KODI_BRANCH}_ffmpeg_${FFMPEG_ID}_$(lsb_release -c -s).deb
+RUN cp -v /pkg/*.deb kodi-rockchip-gbm_${OS_ARCH}_kodi_${KODI_BRANCH}_ffmpeg_${FFMPEG_ID}_pvr_$(lsb_release -c -s).deb
 
 # An intermediate stage, which is just the base image + the installed built package.
 # Who wouldn't want to run Kodi in a container?
