@@ -1,12 +1,21 @@
 # Warning to the reader. This produces a .deb package with stuff in /usr/local. If this scares you, stop reading.
 # It is in fact, non-debian packaging. Probably fpm would be a better choice?
 # xiaobao: 2026-07 新增 pvr.iptvsimple（IPTV Simple Client 直播插件）构建
+# xiaobao: 2026-07 新增 noble/jammy 兼容（见下方三处 xiaobao 注释）
 ARG BASE_IMAGE="debian:trixie"
 FROM ${BASE_IMAGE} AS packager
 
 #### Dependencies. In batches; this is built under buildx and layers not published so we don't care about layer size.
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get -y update && apt-get -y dist-upgrade && apt-get -y install git bash wget curl build-essential devscripts debhelper pkg-config cmake meson tree
+# xiaobao: dh-sequence-single-binary 在老发行版可能不存在，装不上不致命（打包阶段会自适应）
+RUN apt-get -y install dh-sequence-single-binary || echo "dh-sequence-single-binary unavailable, will adapt at packaging time"
+# xiaobao: jammy(22.04) 工具链太旧，自动升级：gcc 11 -> 12，meson 0.61/cmake 3.22 -> pip 新版
+RUN . /etc/os-release && if [ "${VERSION_CODENAME}" = "jammy" ]; then \
+        apt-get -y install gcc-12 g++-12 && \
+        update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 --slave /usr/bin/g++ g++ /usr/bin/g++-12 && \
+        pip3 install --no-cache-dir -U 'cmake<4' meson ninja; \
+    fi
 # Generic Dependencies for kodi
 RUN apt-get -y install debhelper autoconf automake autopoint gettext autotools-dev curl gawk gcc gdc gperf libtool lsb-release meson nasm ninja-build \
                python3-dev python3-pil python3-pip swig unzip uuid-dev zip
@@ -80,8 +89,21 @@ RUN mkdir build && cd build && meson setup --prefix=/usr/local --buildtype=relea
 
 # Clone Kodi; ARG invalidates the cache!
 ARG KODI_BRANCH="master"
+# xiaobao: 固定到上游最后一次验证可编译的 master 提交（2026-07-21，对应上游 release 20260721-1741）。
+#          kodi master 是移动目标，Rockchip 支持多次被合并/回退（见 README），最新 master 随时可能断编译。
+#          KODI_COMMIT 留空或填 "latest" 时回退为克隆最新 master。
+ARG KODI_COMMIT="70b11fc1ec8b493ef7580e54bacef76215afb1a1"
 WORKDIR /src
-RUN git -c advice.detachedHead=false clone -b "${KODI_BRANCH}" --single-branch https://github.com/xbmc/xbmc.git kodi
+RUN if [ -n "${KODI_COMMIT}" ] && [ "${KODI_COMMIT}" != "latest" ]; then \
+        echo "=== Building PINNED Kodi commit: ${KODI_COMMIT} ==="; \
+        git init kodi && cd kodi && \
+        git remote add origin https://github.com/xbmc/xbmc.git && \
+        git -c advice.detachedHead=false fetch --depth=1 origin "${KODI_COMMIT}" && \
+        git checkout -q FETCH_HEAD; \
+    else \
+        echo "=== Building LATEST Kodi ${KODI_BRANCH} ==="; \
+        git -c advice.detachedHead=false clone -b "${KODI_BRANCH}" --single-branch https://github.com/xbmc/xbmc.git kodi; \
+    fi
 WORKDIR /src/kodi
 RUN git rev-parse HEAD
 
@@ -142,6 +164,19 @@ RUN rm -rf /usr/local/include && cp -pr /usr/local /pkg/src/usr/
 # Prepare debian binary package
 WORKDIR /pkg/src
 ADD debian /pkg/src/debian
+
+# xiaobao: debhelper < 14（noble 13.14 / jammy 13.6）不支持 compat 14，打包前自动降级到 13；
+#          若 dh-sequence-single-binary 不存在则从 Build-Depends 剔除（单包场景行为一致）
+RUN DH_MAJOR="$(dpkg-query -W -f='${Version}' debhelper | cut -d. -f1)" && \
+    if [ "${DH_MAJOR}" -lt 14 ]; then \
+        echo "debhelper ${DH_MAJOR} detected: downgrading X-DH-Compat to 13"; \
+        sed -i 's/^X-DH-Compat:.*/X-DH-Compat: 13/' /pkg/src/debian/control && \
+        sed -i 's/debhelper (>= 13.16~)/debhelper (>= 13)/' /pkg/src/debian/control; \
+    fi && \
+    if ! dpkg-query -W dh-sequence-single-binary >/dev/null 2>&1; then \
+        echo "dh-sequence-single-binary missing: stripping from Build-Depends"; \
+        sed -i 's/, dh-sequence-single-binary//' /pkg/src/debian/control; \
+    fi
 # Example GUI settings. This is probably old and unuseful these days.
 ADD userdata/guisettings.xml /pkg/src/usr/local/share/kodi/example_userdata_guisettings.xml
 
