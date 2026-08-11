@@ -11,8 +11,9 @@ RUN apt-get -y update && apt-get -y dist-upgrade && apt-get -y install git bash 
 # xiaobao: dh-sequence-single-binary 在老发行版可能不存在，装不上不致命（打包阶段会自适应）
 RUN apt-get -y install dh-sequence-single-binary || echo "dh-sequence-single-binary unavailable, will adapt at packaging time"
 # xiaobao: jammy(22.04) 工具链太旧，自动升级：gcc 11 -> 12，meson 0.61/cmake 3.22 -> pip 新版
+#          注意 python3-pip 必须在这一步装（python3-pip 的官方依赖批次在后面，直接 pip3 会 command not found）
 RUN . /etc/os-release && if [ "${VERSION_CODENAME}" = "jammy" ]; then \
-        apt-get -y install gcc-12 g++-12 && \
+        apt-get -y install gcc-12 g++-12 python3-pip && \
         update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 --slave /usr/bin/g++ g++ /usr/bin/g++-12 && \
         pip3 install --no-cache-dir -U 'cmake<4' meson ninja; \
     fi
@@ -165,13 +166,16 @@ RUN rm -rf /usr/local/include && cp -pr /usr/local /pkg/src/usr/
 WORKDIR /pkg/src
 ADD debian /pkg/src/debian
 
-# xiaobao: debhelper < 14（noble 13.14 / jammy 13.6）不支持 compat 14，打包前自动降级到 13；
-#          若 dh-sequence-single-binary 不存在则从 Build-Depends 剔除（单包场景行为一致）
+# xiaobao: 跨 debhelper 版本的 compat 声明适配（已在 debhelper 13.11 环境实测打包通过）
+#   背景：X-DH-Compat 是 debhelper 14 新增的声明方式，13.x（noble 13.14 / bookworm 13.11 / jammy 13.6）
+#         根本不认识会直接忽略，导致 dh 报 "Please specify the compatibility level"；
+#         而 debian/compat 文件又在 debhelper 14 被移除（trixie/forky 不能用旧写法）。
+#         两代通吃的写法是 Build-Depends: debhelper-compat (= X)（debhelper 12~15 全支持）。
 RUN DH_MAJOR="$(dpkg-query -W -f='${Version}' debhelper | cut -d. -f1)" && \
     if [ "${DH_MAJOR}" -lt 14 ]; then \
-        echo "debhelper ${DH_MAJOR} detected: downgrading X-DH-Compat to 13"; \
-        sed -i 's/^X-DH-Compat:.*/X-DH-Compat: 13/' /pkg/src/debian/control && \
-        sed -i 's/debhelper (>= 13.16~)/debhelper (>= 13)/' /pkg/src/debian/control; \
+        echo "debhelper ${DH_MAJOR}: switching compat declaration to debhelper-compat (= 13)"; \
+        sed -i '/^X-DH-Compat:/d' /pkg/src/debian/control && \
+        sed -i 's/debhelper (>= 13.16~)/debhelper-compat (= 13)/' /pkg/src/debian/control; \
     fi && \
     if ! dpkg-query -W dh-sequence-single-binary >/dev/null 2>&1; then \
         echo "dh-sequence-single-binary missing: stripping from Build-Depends"; \
