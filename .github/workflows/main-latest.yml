@@ -2,12 +2,21 @@ name: main-latest
 
 # xiaobao: 2026-07 修复说明
 #  1) set-output 已被 GitHub 禁用（会直接失败），改为 $GITHUB_OUTPUT
-#  2) matrix 只保留 trixie（RK3568 目标系统），forky 需要时取消注释
+#  2) matrix 构建 trixie + noble + jammy 三个底座（forky/bookworm 需要时取消注释）
+#     jammy 标记 experimental：允许失败，不阻塞 trixie/noble 的 deb 发布
 #  3) ghcr 容器镜像推送改为 continue-on-error，失败不阻塞 deb 发布
 #  4) release 换用维护中的 softprops/action-gh-release（原 action 基于 node12 已被淘汰）
+#  5) 2026-08-11：最新 kodi master 编译中断（上游最后验证通过 = 2026-07-21），
+#     默认固定 KODI_COMMIT 到该已验证提交；Run workflow 时填 latest 可试最新 master
 
 on:
   workflow_dispatch: # Actions 页面手动触发
+    inputs:
+      kodi_commit:
+        description: 'Kodi 提交 SHA（默认 2026-07-21 上游已验证；填 latest 用最新 master）'
+        required: true
+        default: '70b11fc1ec8b493ef7580e54bacef76215afb1a1'
+        type: string
   #push:
   #  branches: [ main ]
 
@@ -29,14 +38,18 @@ jobs:
   build:
     needs: [ prepare ]
     runs-on: ${{ matrix.arch.runner }}
+    # jammy 标记为 experimental：即使失败也不拖垮整个 workflow，trixie/noble 照常发布
+    continue-on-error: ${{ matrix.distro.experimental == true }}
     strategy:
       fail-fast: false # let other jobs try to complete if one fails
       matrix:
         arch: [ { name: 'arm64', runner: "ubuntu-24.04-arm" } ]
         distro:
-          #- { id: 'bookworm', image: 'debian:bookworm' }
+          - { id: 'bookworm', image: 'debian:bookworm' }
           - { id: 'trixie', image: 'debian:trixie' }
-          #- { id: 'forky', image: 'debian:forky' }
+          - { id: 'noble',  image: 'ubuntu:noble' }
+          - { id: 'jammy',  image: 'ubuntu:jammy', experimental: true }
+          - { id: 'forky', image: 'debian:forky' }
         ffmpeg:
           #- { branch: '7.1', id: '71' }
           #- { branch: '8.0', id: '80' }
@@ -72,6 +85,7 @@ jobs:
             OS_ARCH=${{ matrix.arch.name }}
             FFMPEG_BRANCH=${{ matrix.ffmpeg.branch }}
             FFMPEG_ID=${{ matrix.ffmpeg.id }}
+            KODI_COMMIT=${{ github.event.inputs.kodi_commit || '70b11fc1ec8b493ef7580e54bacef76215afb1a1' }}
           outputs: |
             type=local,dest=out
 
@@ -109,6 +123,7 @@ jobs:
             OS_ARCH=${{ matrix.arch.name }}
             FFMPEG_BRANCH=${{ matrix.ffmpeg.branch }}
             FFMPEG_ID=${{ matrix.ffmpeg.id }}
+            KODI_COMMIT=${{ github.event.inputs.kodi_commit || '70b11fc1ec8b493ef7580e54bacef76215afb1a1' }}
 
   release:
     needs: [ prepare, build ] # depend on the previous jobs...
@@ -131,7 +146,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{needs.prepare.outputs.created}}"
-          name: "kodi-rockchip-gbm ${{needs.prepare.outputs.created}} (trixie, ffmpeg 8.1, pvr)"
+          name: "kodi-rockchip-gbm ${{needs.prepare.outputs.created}} (ffmpeg 8.1 + pvr)"
           prerelease: false
           files: |
             out/*.deb
