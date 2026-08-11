@@ -45,10 +45,10 @@ jobs:
       matrix:
         arch: [ { name: 'arm64', runner: "ubuntu-24.04-arm" } ]
         distro:
-          #- { id: 'bookworm', image: 'debian:bookworm' }
+          - { id: 'bookworm', image: 'debian:bookworm' }
           - { id: 'trixie', image: 'debian:trixie' }
-          #- { id: 'noble',  image: 'ubuntu:noble' }
-          #- { id: 'jammy',  image: 'ubuntu:jammy', experimental: true }
+          - { id: 'noble',  image: 'ubuntu:noble' }
+          - { id: 'jammy',  image: 'ubuntu:jammy', experimental: true }
           - { id: 'forky', image: 'debian:forky' }
         ffmpeg:
           #- { branch: '7.1', id: '71' }
