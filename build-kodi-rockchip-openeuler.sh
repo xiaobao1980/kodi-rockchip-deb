@@ -370,7 +370,8 @@ find "$STAGE$PREFIX/lib" -name '*.a' -delete 2>/dev/null || true
 find "$STAGE$PREFIX/lib" -name '*.la' -delete 2>/dev/null || true
 
 # 计算文件清单（相对 / 的绝对路径，供 RPM %files 使用）
-mapfile -t FILES < <(cd "$STAGE" && find usr \( -type f -o -type l \) | sed 's|^|/|' | sort)
+# 计算文件清单（绝对路径，供 RPM %files 使用）；强制以 /usr/ 开头，过滤异常行（如 Me.txt 裸名）
+mapfile -t FILES < <(cd "$STAGE" && find usr \( -type f -o -type l \) -printf '/%p\n' | sort -u | grep '^/usr/')
 [ "${#FILES[@]}" -gt 0 ] || die "staging 为空，无法打包"
 
 #---- .rpm（openEuler）----
@@ -413,12 +414,13 @@ if [ "$BUILD_RPM" = "yes" ]; then
     echo "%defattr(-,root,root,-)"
     for f in "${FILES[@]}"; do echo "$f"; done
     echo "%changelog"
-    echo "* $(date -R) openEuler Kodi SIG <kodi@openeuler.local> - $PKG_VERSION-1"
+    echo "* $(date '+%a %b %d %Y') openEuler Kodi SIG <kodi@openeuler.local> - $PKG_VERSION-1"
     echo "- Build from armsurvivors/kodi-rockchip-deb, adapted for openEuler (rpm+deb)."
   } > "$SPEC"
   log "  生成 RPM：$SPEC"
   rpmbuild --define "%_topdir $RPMBUILD" -bb "$SPEC" \
-    && find "$RPMBUILD/RPMS" -name '*.rpm' -exec mv -v {} "$OUT/" \;
+    && find "$RPMBUILD/RPMS" -name '*.rpm' -exec mv -v {} "$OUT/" \; \
+    || die "rpmbuild 失败（见上方 RPM 构建错误）"
 fi
 
 #---- .deb（Debian 系跨发行版）----
