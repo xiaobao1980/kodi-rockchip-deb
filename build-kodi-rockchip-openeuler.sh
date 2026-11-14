@@ -164,7 +164,7 @@ log "Step 3.5/14 编译 pugixml（源码）"
 cd "$WORK"
 [ -d pugixml ] || git clone --depth 1 https://github.com/zeux/pugixml.git
 rm -rf build-pugixml
-cmake -S pugixml -B build-pugixml -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
+cmake -S pugixml -B build-pugixml -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
 cmake --build build-pugixml -j"$JOBS"
 cmake --install build-pugixml
 
@@ -175,7 +175,7 @@ if [ "$MPP_RGA" = "yes" ]; then
   [ -d mpp ] || git clone --depth 1 --branch "$MPP_BRANCH" "$MPP_REPO" mpp
   rm -rf mpp/rkmpp_build
   # 注意：源码树是 mpp/，rkmpp_build 只是 cmake 自建的构建目录（上游同款写法）
-  cmake -S mpp -B mpp/rkmpp_build -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF
+  cmake -S mpp -B mpp/rkmpp_build -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF
   cmake --build mpp/rkmpp_build -j"$JOBS"
   cmake --install mpp/rkmpp_build
 
@@ -205,16 +205,28 @@ if [ "$FLAVOR" = "v4l2requests" ]; then
     [ -f "$p" ] && { log "  应用 $(basename "$p")"; patch -p1 < "$p"; }
   done
 fi
-./configure --prefix="$PREFIX" --enable-shared --disable-static "${FF_CONFIG[@]}" \
+./configure --prefix="$PREFIX" --enable-shared --disable-static --enable-rpath "${FF_CONFIG[@]}" \
   || die "ffmpeg configure 失败"
 make -j"$JOBS"
 make install
+# 把刚装到 /usr/local 的库纳入链接器缓存（openEuler 默认不搜 /usr/local/lib）
+echo '/usr/local/lib' >/etc/ld.so.conf.d/usrlocal.conf 2>/dev/null
+ldconfig 2>/dev/null || true
 
 # ffmpeg 解码器门禁（与上游一致：确认本风味硬解解码器已编入）
 log "  ffmpeg 解码器自检"
-LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/bin/ffmpeg" -hide_banner -decoders 2>/dev/null \
-  | grep -E "$(echo ${FFMPEG_DECODERS// /|})" >/dev/null \
-  || die "ffmpeg 解码器不全，缺: $FFMPEG_DECODERS"
+DECODERS_TXT=$(LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib64" "$PREFIX/bin/ffmpeg" -hide_banner -decoders 2>/tmp/ff-dec.err)
+if [ -z "$DECODERS_TXT" ]; then
+  log "  [WARN] ffmpeg -decoders 无输出，疑似运行时库缺失："
+  sed 's/^/    /' /tmp/ff-dec.err | tail -20
+  log "    ldd $PREFIX/bin/ffmpeg :"
+  ldd "$PREFIX/bin/ffmpeg" 2>&1 | grep -i "not found" | sed 's/^/    /' || true
+fi
+miss=""
+for d in $FFMPEG_DECODERS; do
+  printf '%s\n' "$DECODERS_TXT" | grep -qw "$d" || miss="$miss $d"
+done
+[ -z "$miss" ] || die "ffmpeg 解码器不全，缺:$miss"
 
 #------------------------- Step 7 Kodi ----------------------------------------
 log "Step 7/14 编译 Kodi ($KODI_BRANCH, GBM/GLES)"
@@ -305,8 +317,8 @@ cp "$SRC/pulseaudio/system.pa" "$STAGE$PREFIX/share/pulse-kodi/system.pa"
 cp "$SRC"/debian/*.service "$STAGE/usr/lib/systemd/system/"
 
 #------------------------- Step 12 RUNPATH ------------------------------------
-log "Step 12/14 写入 RUNPATH（锁定 /usr/local/lib）"
-runpath="$PREFIX/lib:$PREFIX/lib/$(gcc -dumpmachine)"
+log "Step 12/14 写入 RUNPATH（锁定 /usr/local/lib 与 lib64）"
+runpath="$PREFIX/lib:$PREFIX/lib64:$PREFIX/lib/$(gcc -dumpmachine)"
 for elf in "$STAGE$PREFIX/lib/kodi/kodi-gbm" "$STAGE$PREFIX/bin/ffmpeg" "$STAGE$PREFIX/bin/ffprobe"; do
   [ -f "$elf" ] || die "RUNPATH 目标缺失: $elf"
   patchelf --set-rpath "$runpath" "$elf"
@@ -316,9 +328,17 @@ done
 #------------------------- Step 13 门禁 ---------------------------------------
 log "Step 13/14 自检门禁"
 gate "GATE-1：staging ffmpeg 必须带本风味解码器"
-LD_LIBRARY_PATH="$STAGE$PREFIX/lib" "$STAGE$PREFIX/bin/ffmpeg" -hide_banner -decoders 2>/dev/null \
-  | grep -E "$(echo ${FFMPEG_DECODERS// /|})" >/dev/null \
-  || die "ffmpeg 解码器不全，缺: $FFMPEG_DECODERS"
+DECODERS_TXT=$(LD_LIBRARY_PATH="$STAGE$PREFIX/lib:$STAGE$PREFIX/lib64" "$STAGE$PREFIX/bin/ffmpeg" -hide_banner -decoders 2>/tmp/ff-dec2.err)
+if [ -z "$DECODERS_TXT" ]; then
+  log "  [WARN] staging ffmpeg -decoders 无输出："
+  sed 's/^/    /' /tmp/ff-dec2.err | tail -20
+  ldd "$STAGE$PREFIX/bin/ffmpeg" 2>&1 | grep -i "not found" | sed 's/^/    /' || true
+fi
+miss=""
+for d in $FFMPEG_DECODERS; do
+  printf '%s\n' "$DECODERS_TXT" | grep -qw "$d" || miss="$miss $d"
+done
+[ -z "$miss" ] || die "ffmpeg 解码器不全，缺:$miss"
 log "GATE-1 通过"
 gate "GATE-2：kodi/ffmpeg 链接闭包无 not found"
 LD_LIBRARY_PATH="$STAGE$PREFIX/lib" ldd "$STAGE$PREFIX/lib/kodi/kodi-gbm" "$STAGE$PREFIX/bin/ffmpeg" "$STAGE$PREFIX/bin/ffprobe" \
