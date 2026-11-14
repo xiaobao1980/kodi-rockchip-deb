@@ -90,32 +90,53 @@ mkdir -p "$WORK" "$STAGE$PREFIX" "$OUT"
 
 #------------------------- Step 1 依赖 ----------------------------------------
 log "Step 1/14 安装编译依赖（dnf）"
-# 注：下列包名按 openEuler 24.03 / Fedora 命名习惯；若某 -devel 在您的源中缺失，
-#     请在下方 KODI 的 cmake 里用 -DENABLE_*=OFF 关闭对应功能（见步骤 7 注释）。
-dnf install -y \
+# openEuler/RHEL 命名习惯：devel 包名通常就是项目名（xz-devel / avahi-devel），
+# 不是 Debian 的 lib<名>-dev。dnf_install 逐个校验可用性：有的才装，没有的记下来继续，
+# 一次运行即可暴露全部包名问题，避免“一遇错包整批中断”。
+dnf_install() {
+  local avail=() missing=()
+  for p in "$@"; do
+    if dnf -q list --available "$p" >/dev/null 2>&1; then
+      avail+=("$p")
+    else
+      missing+=("$p")
+      log "  [缺失] $p（仓库无此名，跳过；若 Kodi 对应功能需要，请改 cmake 关闭）"
+    fi
+  done
+  if [ ${#avail[@]} -gt 0 ]; then
+    dnf install -y "${avail[@]}" >/dev/null 2>&1 || die "核心依赖 dnf install 失败，请检查上面输出"
+  fi
+  if [ ${#missing[@]} -gt 0 ]; then
+    printf '%s\n' "${missing[@]}" > "$WORK/missing-deps.txt"
+    log "  [汇总] 缺失包已写入 $WORK/missing-deps.txt"
+  fi
+}
+
+# 核心工具链 + Kodi 编译必需（缺失即致命）
+dnf_install \
   gcc gcc-c++ make cmake meson ninja-build git pkgconf-pkg-config \
   nasm yasm gperf bison gettext autoconf automake libtool patch \
   wget curl zip unzip tar bzip2 rsync python3 python3-devel python3-pip \
   patchelf tree gawk \
-  zlib-devel bzip2-devel xz-devel liblzma-devel libltdl-devel \
+  zlib-devel bzip2-devel xz-devel libtool-devel \
   libdrm-devel hwdata \
   alsa-lib-devel pulseaudio-libs-devel libass-devel freetype-devel fribidi-devel fontconfig-devel harfbuzz-devel \
   libjpeg-turbo-devel libpng-devel libtiff-devel giflib-devel \
   libogg-devel libvorbis-devel flac-devel \
   openssl-devel gnutls-devel libgcrypt-devel libgpg-error-devel \
-  sqlite-devel taglib-devel libxml2-devel libxslt-devel pcre2-devel liblzma-devel \
+  sqlite-devel taglib-devel libxml2-devel libxslt-devel pcre2-devel \
   libuuid-devel libunistring-devel libcurl-devel \
   libX11-devel libXext-devel libXrandr-devel libXinerama-devel libXv-devel libXt-devel \
   libxkbcommon-devel wayland-devel wayland-protocols-devel \
   mesa-libEGL-devel mesa-libGLES-devel mesa-libgbm-devel mesa-libGL-devel mesa-libGLU-devel \
   libinput-devel dbus-devel systemd-devel \
-  libavahi-client-devel bluez-libs-devel libexiv2-devel \
+  avahi-devel bluez-libs-devel exiv2-devel \
   rapidjson-devel nlohmann-json-devel spdlog-devel fmt-devel lcms2-devel lzo-devel \
-  libarchive-devel libmicrohttpd-devel libpugixml-devel tinyxml-devel tinyxml2-devel \
+  libarchive-devel libmicrohttpd-devel pugixml-devel tinyxml-devel tinyxml2-devel \
   libnfs-devel samba-devel
-# 下面这些“风险包”单独装，缺失不致命（CI/构建时按需关闭对应 Kodi 功能）
+# 下列“风险包”缺失不致命（CI/构建时按需关闭对应 Kodi 功能）
 for p in libcec-devel lirc-devel mariadb-devel rtmpdump-devel lame-devel enca-devel; do
-  dnf install -y "$p" >/dev/null 2>&1 && log "  已装可选包 $p" || log "  [跳过] 可选包 $p 缺失（对应 Kodi 功能将关闭）"
+  dnf -q list --available "$p" >/dev/null 2>&1 && dnf install -y "$p" >/dev/null 2>&1 && log "  已装可选包 $p" || log "  [跳过] 可选包 $p 缺失（对应 Kodi 功能将关闭）"
 done
 
 #------------------------- Step 2 libdisplay-info（Kodi GBM 硬依赖）-----------
