@@ -137,7 +137,7 @@ dnf_install \
   avahi-devel bluez-devel exiv2-devel libplist-devel libbluray-devel libcdio-devel \
   rapidjson-devel nlohmann-json-devel spdlog-devel fmt-devel lcms2-devel lzo-devel \
   libarchive-devel libmicrohttpd-devel tinyxml-devel tinyxml2-devel \
-  libnfs-devel samba-devel rpm-build dpkg
+  libnfs-devel samba-devel
 # 下列“风险包”缺失不致命（CI/构建时按需关闭对应 Kodi 功能）
 for p in libcec-devel lirc-devel mariadb-devel rtmpdump-devel lame-devel enca-devel; do
   dnf -q list --available "$p" >/dev/null 2>&1 && dnf install -y "$p" >/dev/null 2>&1 && log "  已装可选包 $p" || log "  [跳过] 可选包 $p 缺失（对应 Kodi 功能将关闭）"
@@ -327,7 +327,13 @@ cp "$SRC"/debian/*.service "$STAGE/usr/lib/systemd/system/"
 #------------------------- Step 12 RUNPATH ------------------------------------
 log "Step 12/14 写入 RUNPATH（锁定 /usr/local/lib 与 lib64）"
 runpath="$PREFIX/lib:$PREFIX/lib64:$PREFIX/lib/$(gcc -dumpmachine)"
-for elf in "$STAGE$PREFIX/lib/kodi/kodi-gbm" "$STAGE$PREFIX/bin/ffmpeg" "$STAGE$PREFIX/bin/ffprobe"; do
+# openEuler 是 lib64 体系：kodi-gbm 可能装在 lib 或 lib64，动态定位
+kodi_bin=""
+for cand in "$STAGE$PREFIX/lib/kodi/kodi-gbm" "$STAGE$PREFIX/lib64/kodi/kodi-gbm"; do
+  [ -f "$cand" ] && { kodi_bin="$cand"; break; }
+done
+[ -n "$kodi_bin" ] || die "kodi-gbm 未生成（lib/lib64 均未找到）"
+for elf in "$kodi_bin" "$STAGE$PREFIX/bin/ffmpeg" "$STAGE$PREFIX/bin/ffprobe"; do
   [ -f "$elf" ] || die "RUNPATH 目标缺失: $elf"
   patchelf --set-rpath "$runpath" "$elf"
   readelf -d "$elf" | grep -qF RUNPATH || die "未写入 RUNPATH: $elf"
@@ -349,11 +355,11 @@ done
 [ -z "$miss" ] || die "ffmpeg 解码器不全，缺:$miss"
 log "GATE-1 通过"
 gate "GATE-2：kodi/ffmpeg 链接闭包无 not found"
-LD_LIBRARY_PATH="$STAGE$PREFIX/lib" ldd "$STAGE$PREFIX/lib/kodi/kodi-gbm" "$STAGE$PREFIX/bin/ffmpeg" "$STAGE$PREFIX/bin/ffprobe" \
+LD_LIBRARY_PATH="$STAGE$PREFIX/lib:$STAGE$PREFIX/lib64" ldd "$kodi_bin" "$STAGE$PREFIX/bin/ffmpeg" "$STAGE$PREFIX/bin/ffprobe" \
   | grep 'not found' && die "存在未解析依赖" || true
 log "GATE-2 通过"
 gate "GATE-3：kodi-gbm 二进制存在"
-[ -x "$STAGE$PREFIX/lib/kodi/kodi-gbm" ] || die "kodi-gbm 未生成"
+[ -x "$kodi_bin" ] || die "kodi-gbm 未生成"
 log "GATE-3 通过"
 
 #------------------------- Step 14 打包 ---------------------------------------
