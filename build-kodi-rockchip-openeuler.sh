@@ -400,6 +400,7 @@ if [ "$BUILD_RPM" = "yes" ]; then
     echo "Group:          Applications/Multimedia"
     echo "Source0:        usr.tgz"
     echo "BuildArch:      aarch64"
+    echo "%define debug_package %{nil}"
     echo "Requires:       mesa-libgbm, mesa-libEGL, mesa-libGLES, mesa-libGL, mesa-dri-drivers, libX11, libXext, libXrandr, libXinerama, libXv, libXt, libxkbcommon, wayland, alsa-lib, pulseaudio-libs, libdrm, libinput, systemd"
     echo "%description"
     echo "Kodi media center built for standalone GBM/KMS with GLES rendering for Rockchip"
