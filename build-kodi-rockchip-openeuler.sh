@@ -244,6 +244,10 @@ GIT_VERSION="${KODI_COMMIT}-${FLAVOR}-ffmpeg-${FF_BRANCH}-openeuler-build-${PKG_
 KODI_REV="$(git rev-parse --short=10 HEAD)"
 FF_REV="$(git -C "$WORK/ffmpeg" rev-parse --short=10 HEAD 2>/dev/null || echo unknown)"
 rm -rf build-kodi
+# openEuler 的 harfbuzz-devel 自带的 cmake config 损坏（find_package CONFIG 读取即报
+# “Error reading CMake code”，且不会回退 pkg-config）。删除该系统 cmake config，
+# 让 Kodi 的 SEARCH_EXISTING_PACKAGES 回退到 pkg-config（harfbuzz.pc 正常）。
+rm -f /usr/lib64/cmake/harfbuzz/*.cmake /usr/lib/cmake/harfbuzz/*.cmake 2>/dev/null || true
 # 可选功能：AIRPLAY/WII/OPTICAL 关闭以避开 openEuler 可能缺失的 -devel；
 # openEuler 无 libcec/liblirc/libenca/pulseaudio-devel，对应功能显式关闭（Kodi 默认开启且缺失即报错）；
 # FSTRCMP 在 openEuler 无 libfstrcmp-dev，改用 Kodi 内部构建。
