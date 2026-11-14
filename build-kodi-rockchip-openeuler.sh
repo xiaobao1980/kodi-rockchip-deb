@@ -114,7 +114,7 @@ dnf_install() {
 
 # 核心工具链 + Kodi 编译必需（缺失即致命）
 dnf_install \
-  gcc gcc-c++ make cmake meson ninja-build git pkgconf-pkg-config \
+  gcc gcc-c++ make cmake meson ninja-build git pkgconf \
   nasm yasm gperf bison gettext autoconf automake libtool patch \
   wget curl zip unzip tar bzip2 rsync python3 python3-devel python3-pip \
   patchelf tree gawk \
@@ -125,14 +125,14 @@ dnf_install \
   libogg-devel libvorbis-devel flac-devel \
   openssl-devel gnutls-devel libgcrypt-devel libgpg-error-devel \
   sqlite-devel taglib-devel libxml2-devel libxslt-devel pcre2-devel \
-  libuuid-devel libunistring-devel libcurl-devel \
+  util-linux-devel libunistring-devel libcurl-devel \
   libX11-devel libXext-devel libXrandr-devel libXinerama-devel libXv-devel libXt-devel \
   libxkbcommon-devel wayland-devel wayland-protocols-devel \
-  mesa-libEGL-devel mesa-libGLES-devel mesa-libgbm-devel mesa-libGL-devel mesa-libGLU-devel \
+  mesa-libEGL-devel libglvnd-devel mesa-libgbm-devel mesa-libGL-devel mesa-libGLU-devel \
   libinput-devel dbus-devel systemd-devel \
-  avahi-devel bluez-libs-devel exiv2-devel \
+  avahi-devel bluez-devel exiv2-devel libplist-devel libbluray-devel libcdio-devel \
   rapidjson-devel nlohmann-json-devel spdlog-devel fmt-devel lcms2-devel lzo-devel \
-  libarchive-devel libmicrohttpd-devel pugixml-devel tinyxml-devel tinyxml2-devel \
+  libarchive-devel libmicrohttpd-devel tinyxml-devel tinyxml2-devel \
   libnfs-devel samba-devel
 # 下列“风险包”缺失不致命（CI/构建时按需关闭对应 Kodi 功能）
 for p in libcec-devel lirc-devel mariadb-devel rtmpdump-devel lame-devel enca-devel; do
@@ -145,7 +145,7 @@ cd "$WORK"
 [ -d libdisplay-info ] || git clone --depth 1 https://gitlab.freedesktop.org/emersion/libdisplay-info.git
 rm -rf build-libdisplay-info
 meson setup build-libdisplay-info libdisplay-info --prefix="$PREFIX" --libdir=lib --buildtype=release
-DESTDIR="$STAGE" ninja -C build-libdisplay-info install
+ninja -C build-libdisplay-info install
 
 #------------------------- Step 3 dav1d ---------------------------------------
 log "Step 3/14 编译 dav1d ($DAV1D_VER)"
@@ -153,29 +153,38 @@ cd "$WORK"
 [ -d "dav1d-$DAV1D_VER" ] || { curl -LO "https://code.videolan.org/videolan/dav1d/-/archive/$DAV1D_VER/dav1d-$DAV1D_VER.tar.gz"; tar xf "dav1d-$DAV1D_VER.tar.gz"; }
 rm -rf "build-dav1d"
 meson setup "build-dav1d" "dav1d-$DAV1D_VER" --prefix="$PREFIX" --libdir=lib --buildtype=release --default-library=shared -Denable_tools=false -Denable_tests=false
-DESTDIR="$STAGE" ninja -C build-dav1d install
+ninja -C build-dav1d install
+
+#------------------------- Step 3.5 pugixml（Kodi 硬依赖；openEuler 不打包）---
+log "Step 3.5/14 编译 pugixml（源码）"
+cd "$WORK"
+[ -d pugixml ] || git clone --depth 1 https://github.com/zeux/pugixml.git
+rm -rf build-pugixml
+cmake -S pugixml -B build-pugixml -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
+cmake --build build-pugixml -j"$JOBS"
+cmake --install build-pugixml
 
 #------------------------- Step 4/5 mpp + rga（仅 rkmpp 线）-------------------
 if [ "$MPP_RGA" = "yes" ]; then
   log "Step 4/14 编译 rockchip-mpp ($MPP_BRANCH)"
   cd "$WORK"
   [ -d mpp ] || git clone --depth 1 --branch "$MPP_BRANCH" "$MPP_REPO" mpp
-  rm -rf build-mpp
-  cmake -S mpp/rkmpp_build -B build-mpp -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF
-  cmake --build build-mpp -j"$JOBS"
-  DESTDIR="$STAGE" cmake --install build-mpp
+  rm -rf mpp/rkmpp_build
+  # 注意：源码树是 mpp/，rkmpp_build 只是 cmake 自建的构建目录（上游同款写法）
+  cmake -S mpp -B mpp/rkmpp_build -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF
+  cmake --build mpp/rkmpp_build -j"$JOBS"
+  cmake --install mpp/rkmpp_build
 
   log "Step 5/14 编译 rockchip-rga ($RGA_BRANCH)"
   cd "$WORK"
   [ -d rkrga ] || git clone --depth 1 --branch "$RGA_BRANCH" "$RGA_REPO" rkrga
   rm -rf build-rga
   meson setup rkrga build-rga --prefix="$PREFIX" --libdir=lib --buildtype=release --default-library=shared -Dcpp_args=-fpermissive -Dlibdrm=false -Dlibrga_demo=false
-  DESTDIR="$STAGE" ninja -C build-rga install
+  ninja -C build-rga install
 fi
 
 #------------------------- Step 6 ffmpeg ---------------------------------------
 log "Step 6/14 编译 ffmpeg ($FF_BRANCH)"
-export PKG_CONFIG_PATH="$STAGE$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 cd "$WORK"
 [ -d ffmpeg ] || git clone --depth 1 --branch "$FF_BRANCH" "$FF_REPO" ffmpeg
 cd ffmpeg
@@ -195,7 +204,13 @@ fi
 ./configure --prefix="$PREFIX" --enable-shared --disable-static "${FF_CONFIG[@]}" \
   || die "ffmpeg configure 失败"
 make -j"$JOBS"
-make DESTDIR="$STAGE" install
+make install
+
+# ffmpeg 解码器门禁（与上游一致：确认本风味硬解解码器已编入）
+log "  ffmpeg 解码器自检"
+LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/bin/ffmpeg" -hide_banner -decoders 2>/dev/null \
+  | grep -E "$(echo ${FFMPEG_DECODERS// /|})" >/dev/null \
+  || die "ffmpeg 解码器不全，缺: $FFMPEG_DECODERS"
 
 #------------------------- Step 7 Kodi ----------------------------------------
 log "Step 7/14 编译 Kodi ($KODI_BRANCH, GBM/GLES)"
@@ -222,45 +237,54 @@ cmake -S . -B build-kodi \
   -DENABLE_INTERNAL_FMT=ON -DENABLE_INTERNAL_FLATBUFFERS=ON \
   -DENABLE_INTERNAL_TAGLIB=ON -DENABLE_INTERNAL_SWIG=ON -DENABLE_INTERNAL_CROSSGUID=ON \
   -DENABLE_AIRPLAY=OFF -DENABLE_WII=OFF -DENABLE_OPTICAL=OFF \
-  -DCMAKE_PREFIX_PATH="$STAGE$PREFIX" \
+  -DCMAKE_PREFIX_PATH="$PREFIX" \
   -DGIT_VERSION="$GIT_VERSION"
 cmake --build build-kodi -- -j"$JOBS" || cmake --build build-kodi -- -j"$JOBS" || cmake --build build-kodi -- -j"$JOBS" \
   || die "Kodi 编译失败"
-DESTDIR="$STAGE" cmake --install build-kodi
+cmake --install build-kodi
 
-#------------------------- Step 8/9 插件 --------------------------------------
+#------------------------- Step 8/9 插件（尽力而为，失败不中断核心构建）------
 log "Step 8/14 编译 shadertoy 视觉/屏保插件"
 cd "$WORK"
 for addon in visualization.shadertoy screensaver.shadertoy; do
-  [ -d "$addon" ] || git clone --branch "$KODI_BRANCH" "https://github.com/xbmc/$addon.git"
+  [ -d "$addon" ] || git clone --branch "$KODI_BRANCH" "https://github.com/xbmc/$addon.git" || { log "  [跳过] $addon 克隆失败"; continue; }
   rm -rf "$addon/build"
   cmake -S "$addon" -B "$addon/build" \
     -DADDONS_TO_BUILD="$addon" -DAPP_RENDER_SYSTEM=gles \
     -DADDON_SRC_PREFIX="$WORK" -DCMAKE_INSTALL_PREFIX="$PREFIX/share/kodi/addons" \
-    -DCMAKE_BUILD_TYPE=Release -DPACKAGE_ZIP=1 "$WORK/kodi/cmake/addons"
-  cmake --build "$addon/build" -- -j"$JOBS" || cmake --build "$addon/build" -- -j"$JOBS"
-  DESTDIR="$STAGE" cmake --install "$addon/build"
+    -DCMAKE_BUILD_TYPE=Release -DPACKAGE_ZIP=1 "$WORK/kodi/cmake/addons" \
+    && cmake --build "$addon/build" -- -j"$JOBS" && cmake --install "$addon/build" \
+    || log "  [警告] $addon 构建失败，跳过"
 done
 
-log "Step 9/14 编译二进制插件"
+log "Step 9/14 编译二进制插件（不含 inputstream.rtmp：openEuler 无 librtmp）"
 cd "$WORK"
 rm -rf binary-addons/build
 cmake -S kodi/cmake/addons -B binary-addons/build \
-  -DADDONS_TO_BUILD="vfs.rar vfs.libarchive inputstream.adaptive inputstream.rtmp peripheral.joystick pvr.iptvsimple" \
+  -DADDONS_TO_BUILD="vfs.rar vfs.libarchive inputstream.adaptive peripheral.joystick pvr.iptvsimple" \
   -DAPP_RENDER_SYSTEM=gles -DCMAKE_INSTALL_PREFIX="$PREFIX/share/kodi/addons" \
-  -DCMAKE_BUILD_TYPE=Release -DPACKAGE_ZIP=1
-cmake --build binary-addons/build -- -j"$JOBS" || cmake --build binary-addons/build -- -j"$JOBS"
-DESTDIR="$STAGE" cmake --install binary-addons/build
-for a in vfs.rar vfs.libarchive inputstream.adaptive inputstream.rtmp peripheral.joystick pvr.iptvsimple; do
-  [ -e "$STAGE$PREFIX/share/kodi/addons/$a" ] || die "二进制插件 $a 缺失"
+  -DCMAKE_BUILD_TYPE=Release -DPACKAGE_ZIP=1 \
+  && cmake --build binary-addons/build -- -j"$JOBS" && cmake --install binary-addons/build \
+  || log "  [警告] 二进制插件构建失败，跳过（核心 Kodi 不受影响）"
+for a in vfs.rar vfs.libarchive inputstream.adaptive peripheral.joystick pvr.iptvsimple; do
+  [ -e "$PREFIX/share/kodi/addons/$a" ] && log "  已装插件 $a" || log "  [跳过] 插件 $a 未生成"
 done
 
-#------------------------- Step 10 Jellyfin 仓库插件 --------------------------
+#------------------------- Step 10 Jellyfin 仓库插件（尽力而为）----------------
 log "Step 10/14 预装 Jellyfin 仓库插件"
-cd "$STAGE$PREFIX/share/kodi/addons"
-curl -fsSLO "https://kodi.jellyfin.org/repository.jellyfin.kodi.zip"
-unzip -o -q repository.jellyfin.kodi.zip
-rm -f repository.jellyfin.kodi.zip
+cd "$PREFIX/share/kodi/addons"
+curl -fsSLO "https://kodi.jellyfin.org/repository.jellyfin.kodi.zip" \
+  && unzip -o -q repository.jellyfin.kodi.zip \
+  && rm -f repository.jellyfin.kodi.zip \
+  || log "  [警告] Jellyfin 仓库插件下载失败，跳过"
+
+#------------------------- Step 10.5 同步 /usr/local → staging ---------------
+# Kodi/ffmpeg/插件已装到真实 /usr/local（与上游一致，便于互相发现）；
+# 打包前把它们整树同步到 staging（容器内 /usr/local 基本为空，无需先清理）。
+log "Step 10.5/14 同步 /usr/local → staging"
+rm -rf "$STAGE/usr/local"
+mkdir -p "$STAGE/usr/local"
+cp -a /usr/local/. "$STAGE/usr/local/"
 
 #------------------------- Step 11 appliance / pulseaudio / systemd ------------
 log "Step 11/14 注入 appliance.xml / pulseaudio / systemd 单元"
