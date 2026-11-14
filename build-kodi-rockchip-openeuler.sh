@@ -245,14 +245,17 @@ KODI_REV="$(git rev-parse --short=10 HEAD)"
 FF_REV="$(git -C "$WORK/ffmpeg" rev-parse --short=10 HEAD 2>/dev/null || echo unknown)"
 rm -rf build-kodi
 # 可选功能：AIRPLAY/WII/OPTICAL 关闭以避开 openEuler 可能缺失的 -devel；
-# 其余（CEC/NFS/SMB/LIRC/MYSQL）若对应 -devel 缺失，构建前请加 -DENABLE_*=OFF。
+# openEuler 无 libcec/liblirc/libenca/pulseaudio-devel，对应功能显式关闭（Kodi 默认开启且缺失即报错）；
+# FSTRCMP 在 openEuler 无 libfstrcmp-dev，改用 Kodi 内部构建。
 cmake -S . -B build-kodi \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DCORE_PLATFORM_NAME=gbm -DAPP_RENDER_SYSTEM=gles \
   -DENABLE_OPENGL=OFF -DENABLE_VAAPI=OFF -DENABLE_VDPAU=OFF \
   -DENABLE_INTERNAL_FMT=ON -DENABLE_INTERNAL_FLATBUFFERS=ON \
   -DENABLE_INTERNAL_TAGLIB=ON -DENABLE_INTERNAL_SWIG=ON -DENABLE_INTERNAL_CROSSGUID=ON \
+  -DENABLE_INTERNAL_FSTRCMP=ON \
   -DENABLE_AIRPLAY=OFF -DENABLE_WII=OFF -DENABLE_OPTICAL=OFF \
+  -DENABLE_CEC=OFF -DENABLE_LIRC=OFF -DENABLE_ENCA=OFF -DENABLE_PULSEAUDIO=OFF \
   -DCMAKE_PREFIX_PATH="$PREFIX" \
   -DGIT_VERSION="$GIT_VERSION"
 cmake --build build-kodi -- -j"$JOBS" || cmake --build build-kodi -- -j"$JOBS" || cmake --build build-kodi -- -j"$JOBS" \
