@@ -1,0 +1,38 @@
+# .github/workflows/build-kodi-rockchip-openeuler.yml
+# 在 arm 运行器上用 openEuler 24.03 容器构建 Kodi-rockchip-gbm，产出 rpm + deb。
+# 关键：作业容器用 openEuler 24.03，保证 glibc 2.38 基线，产物才能回 openEuler / deepin 25 跑。
+name: build-kodi-rockchip-openeuler
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['kodi-v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: openeuler/openeuler:24.03
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 一键编译（容器内无 /dev/mpp_service，跳过设备门禁；仅产 rpm+deb）
+        env:
+          SKIP_MPP_CHECK: '1'
+          BUILD_RPM: 'yes'
+          BUILD_DEB: 'yes'
+          BUILD_TAR: 'no'
+          FLAVOR: 'rkmpp'
+        run: bash build-kodi-rockchip-openeuler.sh
+
+      - name: 上传产物 Artifact（保留 90 天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: kodi-rockchip-gbm-${{ github.ref_name }}
+          path: out/*.rpm,out/*.deb
+
+      - name: 打 tag 时发布 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.rpm,out/*.deb
