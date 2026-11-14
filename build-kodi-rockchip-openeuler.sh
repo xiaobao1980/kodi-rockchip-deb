@@ -369,8 +369,17 @@ rm -rf "$STAGE$PREFIX/include"
 find "$STAGE$PREFIX/lib" -name '*.a' -delete 2>/dev/null || true
 find "$STAGE$PREFIX/lib" -name '*.la' -delete 2>/dev/null || true
 
-# 计算文件清单（相对 / 的绝对路径，供 RPM %files 使用）
-# 计算文件清单（绝对路径，供 RPM %files 使用）；强制以 /usr/ 开头，过滤异常行（如 Me.txt 裸名）
+# 清理文件名中的空格/特殊字符：rpm %files 按空白分词，含空格的文件名（如 Kodi 插件的
+# "Read Me.txt"）会被拆成裸名导致 "File must begin with \"/\"" 报错；统一用下划线替代，
+# 同时让 deb 内文件名也保持一致、无怪字符。
+if [ -d "$STAGE/usr" ]; then
+  find "$STAGE/usr" -depth -print0 | while IFS= read -r -d '' p; do
+    b=$(basename "$p"); c=$(printf '%s' "$b" | tr -c 'A-Za-z0-9._-' '_')
+    [ "$c" = "$b" ] || mv -f "$p" "$(dirname "$p")/$c"
+  done
+fi
+
+# 计算文件清单（绝对路径，供 RPM %files 使用）；强制以 /usr/ 开头
 mapfile -t FILES < <(cd "$STAGE" && find usr \( -type f -o -type l \) -printf '/%p\n' | sort -u | grep '^/usr/')
 [ "${#FILES[@]}" -gt 0 ] || die "staging 为空，无法打包"
 
