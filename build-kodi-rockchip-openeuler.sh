@@ -44,6 +44,10 @@ PREFIX="/usr/local"                 # 所有组件统一前缀
 OUT="${OUT:-$SRC/out}"             # 最终包输出目录
 JOBS="$(nproc)"
 
+# openEuler 是 lib64 体系：pkg-config 默认搜索路径不含 /usr/local/lib/pkgconfig（它找 lib64 那套），
+# 显式加入以便 ffmpeg/kodi 的 configure/cmake 找到我们装到 /usr/local 的 dav1d/mpp/rga。
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+
 #------------------------- 开关 ----------------------------------------------
 FLAVOR="${FLAVOR:-rkmpp}"           # rkmpp (vendor) | v4l2requests (mainline)
 BUILD_RPM="${BUILD_RPM:-yes}"       # 产 .rpm（openEuler）
@@ -124,7 +128,7 @@ dnf_install \
   libjpeg-turbo-devel libpng-devel libtiff-devel giflib-devel \
   libogg-devel libvorbis-devel flac-devel \
   openssl-devel gnutls-devel libgcrypt-devel libgpg-error-devel \
-  sqlite-devel taglib-devel libxml2-devel libxslt-devel pcre2-devel \
+  sqlite-devel taglib-devel libzip-devel libxml2-devel libxslt-devel pcre2-devel \
   util-linux-devel libunistring-devel libcurl-devel \
   libX11-devel libXext-devel libXrandr-devel libXinerama-devel libXv-devel libXt-devel \
   libxkbcommon-devel wayland-devel wayland-protocols-devel \
