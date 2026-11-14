@@ -260,6 +260,7 @@ cmake -S . -B build-kodi \
   -DENABLE_INTERNAL_FSTRCMP=ON \
   -DENABLE_AIRPLAY=OFF -DENABLE_WII=OFF -DENABLE_OPTICAL=OFF \
   -DENABLE_CEC=OFF -DENABLE_LIRC=OFF -DENABLE_ENCA=OFF -DENABLE_PULSEAUDIO=OFF \
+  -DENABLE_TESTING=OFF \
   -DCMAKE_PREFIX_PATH="$PREFIX" \
   -DGIT_VERSION="$GIT_VERSION"
 cmake --build build-kodi -- -j"$JOBS" || cmake --build build-kodi -- -j"$JOBS" || cmake --build build-kodi -- -j"$JOBS" \
