@@ -137,7 +137,7 @@ dnf_install \
   avahi-devel bluez-devel exiv2-devel libplist-devel libbluray-devel libcdio-devel \
   rapidjson-devel nlohmann-json-devel spdlog-devel fmt-devel lcms2-devel lzo-devel \
   libarchive-devel libmicrohttpd-devel tinyxml-devel tinyxml2-devel \
-  libnfs-devel samba-devel
+  libnfs-devel samba-devel rpm-build dpkg
 # 下列“风险包”缺失不致命（CI/构建时按需关闭对应 Kodi 功能）
 for p in libcec-devel lirc-devel mariadb-devel rtmpdump-devel lame-devel enca-devel; do
   dnf -q list --available "$p" >/dev/null 2>&1 && dnf install -y "$p" >/dev/null 2>&1 && log "  已装可选包 $p" || log "  [跳过] 可选包 $p 缺失（对应 Kodi 功能将关闭）"
