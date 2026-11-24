@@ -7,7 +7,7 @@ openEuler 范式，让 Kodi（Piers 22.x，GBM/GLES）在 **Rockchip rk35xx**（
 | 目标系统 | 安装包 | 包管理 |
 |---|---|---|
 | openEuler 24.03（rk35xx vendor） | `kodi-rockchip-gbm-<ver>-1.*.aarch64.rpm` | `dnf` / `rpm` |
-| deepin 25（rk35xx vendor） | `kodi-rockchip-gbm_<ver>_arm64.deb` | `apt` / `dpkg` |
+| deepin 25（rk35xx vendor） | `kodi-rockchip-gbm_<ver>_arm64_deepin-25.deb` | `apt` / `dpkg` |
 | Debian trixie/forky、Ubuntu resolute/noble | 同一份 `.deb`（glibc ≥ 2.38 即可） | `apt` / `dpkg` |
 
 > 注：`.deb` 是 Debian 系通用包（deepin 25 / trixie / forky / resolute / noble 共用一个 arm64 包），
@@ -154,8 +154,8 @@ sudo rpm -ivh kodi-rockchip-gbm-<ver>-1.oe*.aarch64.rpm
 
 **deepin 25 / Debian / Ubuntu（rk35xx vendor 内核）：**
 ```bash
-sudo apt-get install -y ./kodi-rockchip-gbm_<ver>_arm64.deb   # 缺依赖时加 -f
-# 或：sudo dpkg -i kodi-rockchip-gbm_<ver>_arm64.deb && sudo apt-get -f install
+sudo apt-get install -y ./kodi-rockchip-gbm_<ver>_arm64_deepin-25.deb   # 缺依赖时加 -f
+# 或：sudo dpkg -i kodi-rockchip-gbm_<ver>_arm64_deepin-25.deb && sudo apt-get -f install
 ```
 
 安装脚本/包的 `pre` 阶段会检查 `/dev/mpp_service` 与 glibc ≥ 2.38，不满足直接拒绝；

@@ -39,7 +39,8 @@ jobs:
           - { id: 'trixie', image: 'debian:trixie' }
           - { id: 'forky', image: 'debian:forky' }
           - { id: 'resolute', image: 'ubuntu:resolute' }
-          # openEuler: glibc 2.38 baseline, and the only one of these that yields a native .rpm (plus a cross-distro .deb).
+          # openEuler: glibc 2.38 baseline, and the only one of these that yields a native .rpm.
+          # Its cross-distro .deb is the deepin 25 package - renamed to *_deepin-25.deb below.
           - { id: 'openeuler-24.03', image: 'openeuler/openeuler:24.03' }
         ffmpeg:
           - { branch: '8.1', id: '81rkmpp', flavor: 'rkmpp', extraTag: 'rkmpp' }
@@ -89,6 +90,18 @@ jobs:
             DAV1D_ID=${{ matrix.dav1d.id }}
           outputs: |
             type=local,dest=out
+
+      # 发布策略：只发完整包（ffmpeg-only 小包不进 artifact/Release）；openEuler 腿只发 .rpm，
+      # 它顺带产出的跨发行版 .deb（glibc 2.38 基线）改名成 deepin-25 包单独发布。
+      - name: 整理产物（剔除小包；openEuler 的 deb 归到 deepin 25）
+        run: |
+          rm -fv out/kodi-rockchip-gbm-ffmpeg_*.deb out/kodi-rockchip-gbm-ffmpeg_*.rpm
+          if [ "${{ matrix.distro.id }}" = "openeuler-24.03" ]; then
+            for d in out/kodi-rockchip-gbm_*_openeuler-24.03.deb; do
+              [ -e "$d" ] && mv -v "$d" "${d%_openeuler-24.03.deb}_deepin-25.deb"
+            done
+          fi
+          ls -l out
 
       - name: Upload deb as artifact ${{ matrix.arch.name }} ${{ matrix.distro.id }}
         uses: actions/upload-artifact@v7

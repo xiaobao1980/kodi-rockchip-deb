@@ -17,8 +17,10 @@ Check which kernel you're on with `uname -r`; a `-vendor-rk35xx` / `-rk35xx` sty
 find MPP on mainline, and the `v4l2requests` build won't find any stateless decoders on the vendor kernel.
 
 Both flavors are built for Debian `trixie`, Debian `forky`, Ubuntu `resolute` and openEuler `24.03`, `arm64` only. The
-openEuler leg is the glibc baseline (2.38) and the only one that also emits a native `.rpm`; its `.deb` is built from
-the same tree and is the most portable one (deepin 25, Debian, Ubuntu).
+openEuler leg is the glibc baseline (2.38) and the only one that emits a native `.rpm`; the `.deb` built from the same
+tree is published as the deepin 25 package (`..._deepin-25.deb`), and is the most portable one (deepin 25, Debian,
+Ubuntu). Releases carry the full `kodi-rockchip-gbm` package only - the ffmpeg-only companion is still built but not
+published.
 
 ## Caveats
 
@@ -203,10 +205,10 @@ your flavor and your distro. Files are named
 
 Both flavors install as the same package (`kodi-rockchip-gbm`), so only one can be installed at a time.
 
-The openEuler leg (`<distro>` = `openeuler-24.03`) builds the same tree twice over and ships both package types:
-`kodi-rockchip-gbm_arm64_kodi_Piers_ffmpeg_<ffmpeg>_openeuler-24.03.rpm` for openEuler, and the same content as a
-`.deb`. That `.deb` is the glibc-2.38-baseline one, so it is also the right pick for deepin 25 and other
-Debian-family hosts older than trixie.
+The openEuler leg (`<distro>` = `openeuler-24.03`) builds the same tree into two package types and publishes them under
+two names: `kodi-rockchip-gbm_arm64_kodi_Piers_ffmpeg_<ffmpeg>_openeuler-24.03.rpm` for openEuler, and the same content
+as `kodi-rockchip-gbm_arm64_kodi_Piers_ffmpeg_<ffmpeg>_deepin-25.deb`. That `.deb` is the glibc-2.38-baseline one, so it
+is the right pick for deepin 25 and other Debian-family hosts older than trixie.
 
 It also carries its own GL stack (mesa 24.3.4 with `panfrost`) under `/usr/local/share/kodi-rockchip/glfallback/lib`
 and **only inside the `.rpm`**: openEuler 24.03's mesa 24.0.3 ships no panfrost DRI driver, so without it Kodi GBM
