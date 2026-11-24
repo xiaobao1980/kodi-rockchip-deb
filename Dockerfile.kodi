@@ -348,18 +348,14 @@ ENV FLAVOR="v4l2requests" \
 
 # Lets ensure the libc/linux headers are recent enough for the stateless decoders we need, otherwise bail out fast.
 # Every check runs (so the log shows the full picture); the build aborts afterwards if any of them failed.
-# The HEVC-EXT symbols are advisory on openEuler: its 6.6 headers predate them, and the standalone
-# openEuler path has only ever gated on the four core symbols (see build-kodi-rockchip-openeuler.sh Step 6).
+# Aborting here matters: patch 0017 needs the HEVC-EXT controls at compile time, so an old-headers build dies
+# 40 minutes later inside ffmpeg with a wall of "undeclared" errors instead of a readable reason.
 RUN <<-HEADERS_CHECK
 . /src/os-info.env
 missing=0
-warn=0
-check() { # usage: check <label> <symbol that linux/videodev2.h must define> [advisory]
-    local soft="${3:-}"
+check() { # usage: check <label> <symbol that linux/videodev2.h must define>
     if printf '#include <linux/videodev2.h>\nint i = %s;\n' "$2" | gcc -x c -c - -o /dev/null 2>/dev/null; then
         printf '  [ OK ] %-9s %s\n' "$1" "$2"
-    elif [ "${soft}" = "advisory" ] && [ "${PKG_FAMILY}" = "rpm" ]; then
-        printf '  [WARN] %-9s %s (openEuler headers: not fatal)\n' "$1" "$2"; warn=$((warn + 1))
     else
         printf '  [FAIL] %-9s %s\n' "$1" "$2"; missing=$((missing + 1))
     fi
@@ -368,14 +364,23 @@ check() { # usage: check <label> <symbol that linux/videodev2.h must define> [ad
 echo "Checking linux/videodev2.h for V4L2 stateless decoder support:"
 check H264     V4L2_CID_STATELESS_H264_DECODE_MODE
 check HEVC     V4L2_CID_STATELESS_HEVC_SPS
-check HEVC-EXT V4L2_CID_STATELESS_HEVC_EXT_SPS_ST_RPS             advisory
-check HEVC-EXT V4L2_CID_STATELESS_HEVC_EXT_SPS_LT_RPS             advisory
-check HEVC-EXT V4L2_HEVC_EXT_SPS_ST_RPS_FLAG_INTER_REF_PIC_SET_PRED advisory
+check HEVC-EXT V4L2_CID_STATELESS_HEVC_EXT_SPS_ST_RPS
+check HEVC-EXT V4L2_CID_STATELESS_HEVC_EXT_SPS_LT_RPS
+check HEVC-EXT V4L2_HEVC_EXT_SPS_ST_RPS_FLAG_INTER_REF_PIC_SET_PRED
 check VP9      V4L2_CID_STATELESS_VP9_FRAME
 check AV1      V4L2_CID_STATELESS_AV1_SEQUENCE
 
-[ "$missing" -eq 0 ] || { echo "ERROR: $missing V4L2 stateless symbol(s) missing; linux headers too old, aborting." >&2; exit 1; }
-echo "Required V4L2 stateless decoder symbols present ($warn advisory miss(es))."
+[ "$missing" -eq 0 ] || {
+    echo "ERROR: $missing V4L2 stateless symbol(s) missing; linux headers too old, aborting." >&2
+    if [ "${PKG_FAMILY}" = "rpm" ]; then
+        echo "ERROR: ${OS_ID} ships kernel-headers 6.6, which predates the HEVC-EXT stateless uAPI that" >&2
+        echo "         patches/ffmpeg/v4l2requests/9.0.2/0017-*.patch is written against (needs >= 6.10)." >&2
+        echo "         openEuler targets the Rockchip vendor kernel: build the rkmpp flavor here, and use" >&2
+        echo "         the Debian/Ubuntu legs for mainline-kernel V4L2 decoding." >&2
+    fi
+    exit 1
+}
+echo "Required V4L2 stateless decoder symbols present."
 HEADERS_CHECK
 
 WORKDIR /src

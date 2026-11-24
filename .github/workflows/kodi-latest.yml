@@ -46,6 +46,14 @@ jobs:
           - { branch: 'n9.0.2', id: '902v4l2requests', flavor: 'v4l2requests', extraTag: 'v4l2requests' }
         dav1d:
           - { branch: '1.5.4', id: '154' }
+        exclude:
+          # openEuler 24.03 的 kernel-headers 是 6.6，早于 HEVC 无状态 EXT uAPI
+          # （V4L2_CID_STATELESS_HEVC_EXT_SPS_ST_RPS / _LT_RPS），ffmpeg 的
+          # 0017-hevc-Add-support-for-sps_st_rps-control.patch 编译期就要它们，打不过。
+          # openEuler 面向 rk35xx vendor 内核，只出 rkmpp 风味；mainline 硬解走 Debian/Ubuntu 线。
+          # 两个对象都写全（deep-equal 匹配），不依赖 exclude 的部分键匹配语义。
+          - distro: { id: 'openeuler-24.03', image: 'openeuler/openeuler:24.03' }
+            ffmpeg: { branch: 'n9.0.2', id: '902v4l2requests', flavor: 'v4l2requests', extraTag: 'v4l2requests' }
     steps:
 
       - name: Checkout

@@ -183,17 +183,20 @@ kodi --logging=console --windowing=gbm --audio-backend=alsa
 
 ## 7. 已知风险 / 待验证
 
-1. **mesa 步骤尚未跑过完整 CI**：板子上是用独立前缀 `/opt/mesa25` 手工验证的（见 4.1 末尾），
-   构建线里的 `Dockerfile.kodi` MESA 段与裸机脚本 Step 3.6 是同参数复刻，`dri/` 补软链与三道门禁已按实测布局写好，
-   但要等一次 openEuler 流水线绿了才算通关。其余部分：GitHub Actions 的
+1. **mesa/glfallback 已过流水线，但包本身还没在板上验过**：`openEuler × rkmpp` 这一路在
+   `feat/openeuler-mesa-glfallback` 的 run `45338970401` 全绿（mesa 24.3.4 → `glfallback` → 三道门禁 → rpm + deb
+   一次跑通，这是这条线首次通关）。板上此前只验证了**诊断**——手工装独立前缀的 mesa（见 4.1 末尾）让
+   `GL_RENDERER` 变成 Panfrost；装的是 `/usr/local/lib64` 里一套无主 mesa，不是我们的 rpm，所以
+   「包里的 glfallback 靠 RUNPATH 命中、且系统里没有别的 GL」这一条还没实测。其余部分：GitHub Actions 的
    `openeuler/openeuler:24.03` 容器（`ubuntu-24.04-arm` 运行器）此前已跑通全流程并发布 rpm + deb
    （run `43600738878` / Release `kodi-v20261114`）；裸机直编仍可能需微调个别 `-devel` 包名。
 2. **openEuler 缺 `dpkg` / `rpm-build`**：脚本在开启 `BUILD_DEB` / `BUILD_RPM` 时自动 `dnf install`，需联网源可用。
 3. **deepin 25 包名差异**：deb `Depends` 用了 `libasound2t64 | libasound2` 兜底，deepin 25 若用旧名 `libasound2`
    走 `|` 备选；其余 mesa/X11/wayland 包名三发行版一致。
 4. **Kodi 构建耗时**：在 arm64 上约 1–2 小时，且二进制插件会从网络拉源码，需稳定网络。
-5. **`v4l2requests` 风味**：脚本已内置（打 V4L2 无状态补丁 + 头文件门禁），但本适配主验 `rkmpp`；
-   若要 mainline 内核硬解，把 `FLAVOR=v4l2requests` 即可，其余流程一致。
+5. **`v4l2requests` 风味在 openEuler 上编不出来**：补丁 0017 需要 >= 6.10 内核头文件里的 HEVC-EXT 无状态符号，
+   openEuler 24.03 只有 6.6（详见第 9 节末条）；脚本会在这一步直接报错并说明原因。mainline 内核硬解请用
+   `FLAVOR=v4l2requests` 跑 Debian/Ubuntu 线，openEuler 侧只用 `rkmpp`。
 
 ## 8. 与 mpv tar 线的关系
 
@@ -232,8 +235,13 @@ Docker 主线的 openEuler 分支由 `base` 阶段一次探测决定（写入容
   该目录存在时才加，Debian/Ubuntu 线不受影响）。打包段 `packaging/build-openeuler-packages.sh` 复刻裸机脚本
   Step 12–14 已验证的 rpm 规避（文件名清洗、`%changelog` 日期格式、`%define debug_package %{nil}`），
   并在生成 deb 树时 `rm -rf` 掉 `glfallback`（见 4.1）；rpm 的文件清单由 `find usr` 生成，软链会原样保留。
-- v4l2requests 风味：openEuler 的 6.6 头文件缺 `V4L2_CID_STATELESS_HEVC_EXT_*`，这几个符号在该家族降为
-  告警（与裸机脚本一致），四个核心符号仍是硬门禁。
+- v4l2requests 风味：**openEuler 不出这一路**。它的 kernel-headers 是 6.6，早于 HEVC 无状态 EXT uAPI
+  （`V4L2_CID_STATELESS_HEVC_EXT_SPS_ST_RPS` / `_LT_RPS` / `V4L2_HEVC_EXT_SPS_*_FLAG_*`），而 ffmpeg 补丁集的
+  `0017-hevc-Add-support-for-sps_st_rps-control.patch` 编译期就要这些符号——Debian 线靠 trixie-backports 的
+  `linux-libc-dev`（6.12）满足，openEuler 没有等价源。因此 CI 矩阵用 `exclude` 去掉
+  `openEuler-24.03 × v4l2requests` 这一格，两条构建线的头文件门禁也都改成**硬失败并直接说明原因**
+  （早先"降为告警"的写法只是把失败推迟到 ffmpeg 编到一半时的一屏 `undeclared`）。
+  mainline 内核的硬解需求走 Debian/Ubuntu 线；openEuler 面向 rk35xx vendor 内核，出 `rkmpp` 风味。
 
 > 裸机脚本保持原样不动：它面向“在板子/openEuler 主机上直接编”的场景，硬门禁更严格。
 > 两条路径的 openEuler 特殊处理有意保持一致，改一处记得看另一处。

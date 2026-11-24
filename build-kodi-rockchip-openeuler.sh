@@ -275,6 +275,10 @@ if [ "$FLAVOR" = "v4l2requests" ]; then
       && log "    [OK] $sym" || { log "    [FAIL] $sym"; miss=$((miss+1)); }
   done
   [ "$miss" -eq 0 ] || die "V4L2 stateless 符号缺失，linux 头文件过旧"
+  # 0017 号补丁（HEVC sps_st_rps）编译期需要 6.10+ 才有的 HEVC-EXT uAPI；openEuler 24.03 只有 6.6 头文件。
+  # 不在这里拦，就要等 ffmpeg 编到一半刷出一屏 undeclared 报错才知道。
+  printf '#include <linux/videodev2.h>\nint i = V4L2_CID_STATELESS_HEVC_EXT_SPS_ST_RPS;\n' | gcc -x c -c - -o /dev/null 2>/dev/null ||
+    die "内核头文件缺 HEVC-EXT 无状态符号（V4L2_CID_STATELESS_HEVC_EXT_SPS_ST_RPS，需 >= 6.10；本机是 $(rpm -q kernel-headers 2>/dev/null || echo unknown)），打不过 patches/ffmpeg/v4l2requests/9.0.2/0017-*.patch。openEuler 请用 FLAVOR=rkmpp（rk35xx vendor 内核）；mainline 内核硬解请走 Debian/Ubuntu 构建线。"
   for p in "$SRC"/patches/ffmpeg/v4l2requests/"${FF_BRANCH#n}"/*.patch; do
     [ -f "$p" ] && { log "  应用 $(basename "$p")"; patch -p1 < "$p"; }
   done
