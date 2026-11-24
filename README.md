@@ -16,14 +16,16 @@ Check which kernel you're on with `uname -r`; a `-vendor-rk35xx` / `-rk35xx` sty
 `-edge-rockchip64` style kernel needs `v4l2requests`. The flavors are not interchangeable: the `rkmpp` build won't
 find MPP on mainline, and the `v4l2requests` build won't find any stateless decoders on the vendor kernel.
 
-Both flavors are built for Debian `trixie`, Debian `forky` and Ubuntu `resolute`, `arm64` only.
+Both flavors are built for Debian `trixie`, Debian `forky`, Ubuntu `resolute` and openEuler `24.03`, `arm64` only. The
+openEuler leg is the glibc baseline (2.38) and the only one that also emits a native `.rpm`; its `.deb` is built from
+the same tree and is the most portable one (deepin 25, Debian, Ubuntu).
 
 ## Caveats
 
 Understand:
 
 - This is meant for a CLI/server Armbian image. Kodi runs directly on GBM/KMS, so no X11/Wayland/display manager may
-  be running. The `.deb` disables GDM3/SDDM/LightDM on install.
+  be running. The `.deb`/`.rpm` disables GDM3/SDDM/LightDM on install.
 - ⚠️ The `.deb` is not a proper Debian package: everything (Kodi, ffmpeg, dav1d, and for `rkmpp` also MPP/RGA) is
   deployed to `/usr/local`. It works, but if it bothers you, use the container instead.
 - The container and the sample systemd units run Kodi as root, privileged.
@@ -120,6 +122,8 @@ tagged `<distro>-<flavor>-<version>`:
 | `forky-v4l2requests-latest`       | Debian forky, mainline kernel flavor                |
 | `resolute-rkmpp-latest`           | Ubuntu resolute, vendor kernel flavor               |
 | `resolute-v4l2requests-latest`    | Ubuntu resolute, mainline kernel flavor             |
+| `openeuler-24.03-rkmpp-latest`    | openEuler 24.03, vendor kernel flavor               |
+| `openeuler-24.03-v4l2requests-latest` | openEuler 24.03, mainline kernel flavor           |
 | `<distro>-<flavor>-YYYYMMDD-HHMM` | Pinned build, same timestamp as the GitHub release  |
 
 > ℹ️ The old `<distro>-latest` tags (without a flavor) predate the split and are no longer updated.
@@ -186,9 +190,9 @@ docker compose up -d
 
 Required values left empty make Compose fail with a message naming them.
 
-## Install: `.deb` packages
+## Install: `.deb` / `.rpm` packages
 
-Download from the [releases page](https://github.com/armsurvivors/kodi-rockchip-deb/releases) the `.deb` matching both
+Download from the [releases page](https://github.com/armsurvivors/kodi-rockchip-deb/releases) the package matching both
 your flavor and your distro. Files are named
 `kodi-rockchip-gbm_arm64_kodi_Piers_ffmpeg_<ffmpeg>_<distro>.deb`:
 
@@ -199,9 +203,29 @@ your flavor and your distro. Files are named
 
 Both flavors install as the same package (`kodi-rockchip-gbm`), so only one can be installed at a time.
 
+The openEuler leg (`<distro>` = `openeuler-24.03`) builds the same tree twice over and ships both package types:
+`kodi-rockchip-gbm_arm64_kodi_Piers_ffmpeg_<ffmpeg>_openeuler-24.03.rpm` for openEuler, and the same content as a
+`.deb`. That `.deb` is the glibc-2.38-baseline one, so it is also the right pick for deepin 25 and other
+Debian-family hosts older than trixie.
+
+It also carries its own GL stack (mesa 24.3.4 with `panfrost`) under `/usr/local/share/kodi-rockchip/glfallback/lib`
+and **only inside the `.rpm`**: openEuler 24.03's mesa 24.0.3 ships no panfrost DRI driver, so without it Kodi GBM
+renders the entire UI through llvmpipe. `kodi-gbm` and `ffmpeg` reach our copy through the first entry of their
+RUNPATH; that directory is deliberately outside the loader search path (openEuler lists `/usr/local/lib64` in
+`/etc/ld.so.conf`, where a second `libEGL.so.1` would shadow the distro mesa for every process) and no `ldconfig` is
+run for it. The cross-distro `.deb` drops it -- those distros already have panfrost -- and an unused RUNPATH entry is
+ignored. Scope of the bundled drivers: Bifrost via panfrost (rk3566/3568/3576). rk3588's Mali-G610 needs Panthor,
+which this build does not carry; use the Debian/Ubuntu leg there.
+
+```bash
+# openEuler 24.03 (rk35xx vendor kernel for the rkmpp flavor)
+sudo dnf install ./kodi-rockchip-gbm_arm64_kodi_Piers_ffmpeg_81rkmpp_openeuler-24.03.rpm
+sudo systemctl daemon-reload && sudo systemctl start kodi
+```
+
 Each build also produces an ffmpeg-only package, `kodi-rockchip-gbm-ffmpeg_arm64_ffmpeg_<ffmpeg>_<distro>.deb`: the same
 `ffmpeg`/`ffprobe` (and the `/usr/local` libraries they need) without Kodi, for other users of the hardware decoders.
-It conflicts with `kodi-rockchip-gbm`, which already contains them.
+It conflicts with `kodi-rockchip-gbm`, which already contains them. The openEuler leg emits its `.rpm` twin too.
 
 - From an SSH or console connection (not in X11 or Wayland):
     - ✅ install with `sudo apt install ./kodi-rockchip-gbm_*.deb` -- it will pull in a ton of dependencies
@@ -228,6 +252,8 @@ It conflicts with `kodi-rockchip-gbm`, which already contains them.
     - the Summary page also shows the running kernel version (vendor `-rk35xx` vs mainline `-rockchip64`)
 - `.deb`: `dpkg -s kodi-rockchip-gbm` shows the `Kodi-Rockchip-Flavor`, `Kodi-Rockchip-Build` and
   `Kodi-Rockchip-Components` fields; it also `Provides: kodi-rockchip-gbm-<flavor>`
+- `.rpm` (openEuler): `rpm -qi kodi-rockchip-gbm` and the same `Git:` string; the build stamp is also in the
+  `%description`
 - Anywhere (incl. containers): `head -2 /usr/local/share/kodi/system/settings/appliance.xml`
 
 ## Troubleshooting
@@ -241,6 +267,13 @@ It conflicts with `kodi-rockchip-gbm`, which already contains them.
       decoder (s); Kodi's log (`--logging=console`) shows which hwaccel was picked
 - Laggy UI on rk3318/rk3328 (Mali-450): the GPU devfreq governor (`simple_ondemand`) might keep the GPU at its lowest
   clock; try `echo performance | sudo tee /sys/class/devfreq/ff300000.gpu/governor`
+- Laggy UI everywhere else usually means the GPU is not being used: `grep -m1 GL_RENDERER ~/.kodi/temp/kodi.log` (or
+  the `--logging=console` output) should name your Mali, e.g. `Mali-G52 r1 (Panfrost)` on rk3576, not
+  `llvmpipe (LLVM ...)`. openEuler 24.03's own mesa (24.0.3) has no panfrost driver at all, which is why the openEuler
+  leg ships its own mesa under `/usr/local/share/kodi-rockchip/glfallback/lib` -- if that line still says `llvmpipe`
+  there, that `dri` directory is not being reached (it is a set of symlinks onto `libgallium-<ver>.so`, which the GBM
+  loader dlopen()s by name, and `kodi-gbm` must list the directory first in its RUNPATH:
+  `readelf -d /usr/local/lib64/kodi/kodi-gbm | grep RUNPATH`)
 - Tested mostly on rk3588; other SoCs: try and report back (3566/3568 testers needed, and anything on `v4l2requests`)
 
 ## TO-DO
@@ -254,13 +287,15 @@ It conflicts with `kodi-rockchip-gbm`, which already contains them.
 
 - Everything is built in Docker, from a single `Dockerfile.kodi` for both flavors; the `FLAVOR` build-arg (`rkmpp` or
   `v4l2requests`) selects the `ffmpeg-<flavor>` stage, and BuildKit skips the other flavor's stages entirely
+- `BASE_IMAGE` selects the packaging family, detected once in the `base` stage (`/src/os-info.env`):
+  Debian/Ubuntu → `apt` deps + `debuild`, openEuler → `dnf` deps + `rpmbuild` and a cross-distro `dpkg-deb`
 
 ```mermaid
 flowchart TD
-    BI[["BASE_IMAGE<br/>debian:trixie / forky, ubuntu:resolute"]]
+    BI[["BASE_IMAGE<br/>debian:trixie / forky, ubuntu:resolute,<br/>openeuler:24.03"]]
 
     subgraph common["Common to both flavors"]
-        base["<b>base</b><br/>apt deps (+ trixie-backports linux-libc-dev)<br/>clone libdisplay-info, dav1d, kodi<br/>wipe /usr/local, build dav1d + libdisplay-info"]
+        base["<b>base</b><br/>apt or dnf deps (+ trixie-backports linux-libc-dev)<br/>clone libdisplay-info, dav1d, kodi<br/>wipe /usr/local, build dav1d + libdisplay-info<br/>(openEuler also builds pugixml and mesa/panfrost from source)"]
     end
 
     subgraph flavors["Flavor stages (only the selected one is built)"]
@@ -270,8 +305,8 @@ flowchart TD
 
     sel{"FROM ffmpeg-${FLAVOR}"}
     ff["<b>ffmpeg</b><br/>shared checks:<br/>FFMPEG_DECODERS present, asm enabled"]
-    pk["<b>packager</b><br/>Kodi patches + build, shadertoy, binary add-ons,<br/>jellyfin repo, RUNPATH, render metadata, debuild<br/>→ /artifacts/*.deb"]
-    ck["<b>containerized-kodi</b><br/>BASE_IMAGE + installed .deb<br/>(pushed to ghcr.io)"]
+    pk["<b>packager</b><br/>Kodi patches + build, shadertoy, binary add-ons,<br/>jellyfin repo, RUNPATH, render metadata<br/>debuild, or rpmbuild + dpkg-deb on openEuler<br/>→ /artifacts/*.deb (+ *.rpm)"]
+    ck["<b>containerized-kodi</b><br/>BASE_IMAGE + installed .deb / .rpm<br/>(pushed to ghcr.io)"]
     sc["<b>(final, scratch)</b><br/>just the .deb<br/>(default target, --output local)"]
     BI --> base
     BI --> ck
@@ -293,20 +328,21 @@ flowchart TD
 | Variable          | Default                                   | Meaning                                                                            |
 |-------------------|-------------------------------------------|------------------------------------------------------------------------------------|
 | `FLAVOR`          | `rkmpp`                                   | `rkmpp` (vendor kernel) or `v4l2requests` (mainline kernel)                        |
-| `DISTRO`          | `trixie`                                  | `trixie`, `forky` or `resolute`                                                    |
-| `BASE_IMAGE`      | `debian:<DISTRO>` / `ubuntu:resolute`     | override the base image                                                            |
-| `BUILD_DEB`       | `yes`                                     | build the `.deb`                                                                   |
-| `EXPORT_DEB`      | `yes`                                     | `yes`: write the `.deb` to `OUTPUT`; `no`: load the `.deb`-only image as `DEB_TAG` |
+| `DISTRO`          | `trixie`                                  | `trixie`, `forky`, `resolute` or `openeuler-24.03`                                  |
+| `BASE_IMAGE`      | `debian:<DISTRO>` / `ubuntu:resolute` / `openeuler/openeuler:24.03` | override the base image   |
+| `BUILD_DEB`       | `yes`                                     | build the packages (`.rpm` as well on openEuler)                                     |
+| `EXPORT_DEB`      | `yes`                                     | `yes`: write the packages to `OUTPUT`; `no`: load the packages-only image as `DEB_TAG` |
 | `OUTPUT`          | `./out`                                   | where the exported `.deb` lands                                                    |
 | `DEB_TAG`         | `kodi-rockchip-gbm:<DISTRO>-<FLAVOR>-deb` | tag for the `.deb`-only image (when not exporting)                                 |
 | `BUILD_CONTAINER` | `yes`                                     | also build the runnable container (`containerized-kodi` stage)                     |
 | `CONTAINER_TAG`   | `kodi-rockchip-gbm:<DISTRO>-<FLAVOR>`     | tag for the runnable container                                                     |
-| `PACKAGE_VERSION` | Dockerfile default                        | version stamped into the `.deb`                                                    |
+| `PACKAGE_VERSION` | Dockerfile default                        | version stamped into the packages                                                  |
 | `BUILD_CMD`       | `docker buildx build`                     | build command                                                                      |
 | `SUMMARY_DELAY`   | `5`                                       | seconds to show the summary before building (`0` to skip)                          |
 
 ```bash
 FLAVOR=v4l2requests DISTRO=forky ./build.sh                 # .deb to ./out + container
+DISTRO=openeuler-24.03 ./build.sh                           # .rpm + cross-distro .deb to ./out + container
 FLAVOR=rkmpp BUILD_CONTAINER=no ./build.sh                  # just the .deb
 BUILD_DEB=no CONTAINER_TAG=ghcr.io/me/kodi:test ./build.sh  # just the container
 ```

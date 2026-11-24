@@ -2,6 +2,7 @@
 # Local build for kodi-rockchip-gbm; see the GHA workflow for the full CI matrix.
 # Everything is controlled via environment variables, e.g.:
 #   FLAVOR=v4l2requests DISTRO=forky ./build.sh
+#   DISTRO=openeuler-24.03 ./build.sh                       # .rpm + cross-distro .deb, glibc 2.38 baseline
 #   FLAVOR=rkmpp BUILD_CONTAINER=no ./build.sh
 #   EXPORT_DEB=no CONTAINER_TAG=ghcr.io/me/kodi:test ./build.sh
 set -euo pipefail
@@ -9,11 +10,11 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SRC}"
 
 FLAVOR="${FLAVOR:-rkmpp}"                   # rkmpp (vendor kernel) | v4l2requests (mainline kernel)
-DISTRO="${DISTRO:-trixie}"                  # trixie | forky | resolute
-BUILD_DEB="${BUILD_DEB:-yes}"               # build the .deb (packager stage)
-EXPORT_DEB="${EXPORT_DEB:-yes}"             # yes: write the .deb to OUTPUT; no: load the .deb-only image as DEB_TAG
+DISTRO="${DISTRO:-trixie}"                  # trixie | forky | resolute | openeuler-24.03
+BUILD_DEB="${BUILD_DEB:-yes}"               # build the packages (packager stage)
+EXPORT_DEB="${EXPORT_DEB:-yes}"             # yes: write the packages to OUTPUT; no: load the packages-only image as DEB_TAG
 BUILD_CONTAINER="${BUILD_CONTAINER:-yes}"   # also build the runnable containerized-kodi image
-OUTPUT="${OUTPUT:-${SRC}/out}"              # where the .deb lands when EXPORT_DEB=yes
+OUTPUT="${OUTPUT:-${SRC}/out}"              # where the packages land when EXPORT_DEB=yes
 DEB_TAG="${DEB_TAG:-kodi-rockchip-gbm:${DISTRO}-${FLAVOR}-deb}"
 CONTAINER_TAG="${CONTAINER_TAG:-kodi-rockchip-gbm:${DISTRO}-${FLAVOR}}"
 KODI_BRANCH="${KODI_BRANCH:-}"              # empty: Dockerfile default (Piers)
@@ -36,10 +37,17 @@ esac
 case "${DISTRO}" in
 	trixie | forky) BASE_IMAGE="${BASE_IMAGE:-debian:${DISTRO}}" ;;
 	resolute) BASE_IMAGE="${BASE_IMAGE:-ubuntu:${DISTRO}}" ;;
-	*) die "DISTRO must be 'trixie', 'forky' or 'resolute', got '${DISTRO}'" ;;
+	openeuler-24.03) BASE_IMAGE="${BASE_IMAGE:-openeuler/openeuler:24.03}" ;;
+	*) die "DISTRO must be 'trixie', 'forky', 'resolute' or 'openeuler-24.03', got '${DISTRO}'" ;;
 esac
 
 [[ "${BUILD_DEB}" == "yes" || "${BUILD_CONTAINER}" == "yes" ]] || die "nothing to do: both BUILD_DEB and BUILD_CONTAINER are 'no'"
+
+# openEuler builds the same tree twice over: a native .rpm plus a cross-distro .deb, both out of /usr/local.
+case "${DISTRO}" in
+	openeuler-*) pkg_kinds=".deb + .rpm" ;;
+	*) pkg_kinds=".deb" ;;
+esac
 
 declare -a build_args=("--build-arg" "BASE_IMAGE=${BASE_IMAGE}" "--build-arg" "FLAVOR=${FLAVOR}")
 [[ -n "${KODI_BRANCH}" ]] && build_args+=("--build-arg" "KODI_BRANCH=${KODI_BRANCH}")
@@ -49,9 +57,9 @@ declare -a build_args=("--build-arg" "BASE_IMAGE=${BASE_IMAGE}" "--build-arg" "F
 declare -a ops=()
 if [[ "${BUILD_DEB}" == "yes" ]]; then
 	if [[ "${EXPORT_DEB}" == "yes" ]]; then
-		ops+=(".deb: build, export to ${OUTPUT}")
+		ops+=("${pkg_kinds}: build, export to ${OUTPUT}")
 	else
-		ops+=(".deb: build, load as image ${DEB_TAG} (not exported)")
+		ops+=("${pkg_kinds}: build, load as image ${DEB_TAG} (not exported)")
 	fi
 fi
 [[ "${BUILD_CONTAINER}" == "yes" ]] && ops+=("container: build containerized-kodi, load as ${CONTAINER_TAG}")
@@ -90,11 +98,11 @@ if [[ "${BUILD_DEB}" == "yes" ]]; then
 	if [[ "${EXPORT_DEB}" == "yes" ]]; then
 		mkdir -p "${OUTPUT}"
 		"${build_cmd[@]}" "${build_args[@]}" --progress=plain --output "type=local,dest=${OUTPUT}" -f "${DOCKERFILE}" .
-		echo "Done: .deb exported to ${OUTPUT}"
+		echo "Done: ${pkg_kinds} exported to ${OUTPUT}"
 		ls -laht "${OUTPUT}"
 	else
 		"${build_cmd[@]}" "${build_args[@]}" --progress=plain --load -t "${DEB_TAG}" -f "${DOCKERFILE}" .
-		echo "Done: .deb image loaded as ${DEB_TAG}"
+		echo "Done: ${pkg_kinds} image loaded as ${DEB_TAG}"
 	fi
 fi
 

@@ -25,6 +25,7 @@ set -euo pipefail
 #------------------------- 可调版本（全部锁死，勿漂） -------------------------
 KODI_BRANCH="Piers"                 # Kodi 22.x 发布分支
 DAV1D_VER="1.5.4"                   # AV1 软解兜底
+MESA_VER="24.3.4"                   # openEuler 自带 mesa 无 panfrost，见 Step 3.6
 # rkmpp（vendor 内核）线
 MPP_REPO="https://github.com/nyanmisaka/mpp.git"
 MPP_BRANCH="jellyfin-mpp"
@@ -41,6 +42,11 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="/opt/kodi-rockchip-build"      # 源码与中间产物
 STAGE="$WORK/root"                  # staging 根，内含 usr/local
 PREFIX="/usr/local"                 # 所有组件统一前缀
+# 自带 mesa 的落脚点：故意不放 $PREFIX/lib|lib64——openEuler 的 /etc/ld.so.conf 第一行就是
+# /usr/local/lib64，GL 库丢进去等于给全系统多出第二个 libEGL.so.1。走 mpv 线同款的"兜底目录"
+# 方案：只靠 kodi-gbm/ffmpeg 的 RUNPATH 命中；mesa 的 prefix 必须是这个目录本身，因为 DRI
+# 搜索路径与 gbm backend 目录是编译期写死的。
+GLFALL="$PREFIX/share/kodi-rockchip/glfallback"
 OUT="${OUT:-$SRC/out}"             # 最终包输出目录
 JOBS="$(nproc)"
 
@@ -138,6 +144,9 @@ dnf_install \
   rapidjson-devel nlohmann-json-devel spdlog-devel fmt-devel lcms2-devel lzo-devel \
   libarchive-devel libmicrohttpd-devel tinyxml-devel tinyxml2-devel \
   libnfs-devel samba-devel
+# Step 3.6 自带 mesa 还需要这些（zstd-devel 目前由 llvm-devel 带进来，显式写出不靠隐式依赖）
+dnf_install llvm-devel zstd-devel byacc flex expat-devel libuuid-devel libcap-devel \
+  python3-mako python3-ply python3-pyyaml
 # 下列“风险包”缺失不致命（CI/构建时按需关闭对应 Kodi 功能）
 for p in libcec-devel lirc-devel mariadb-devel rtmpdump-devel lame-devel enca-devel; do
   dnf -q list --available "$p" >/dev/null 2>&1 && dnf install -y "$p" >/dev/null 2>&1 && log "  已装可选包 $p" || log "  [跳过] 可选包 $p 缺失（对应 Kodi 功能将关闭）"
@@ -167,6 +176,64 @@ rm -rf build-pugixml
 cmake -S pugixml -B build-pugixml -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
 cmake --build build-pugixml -j"$JOBS"
 cmake --install build-pugixml
+
+#------------------------- Step 3.6 mesa + panfrost ----------------------------
+# openEuler 24.03 自带 mesa 24.0.3 不编 panfrost DRI 驱动：Kodi GBM 在瑞芯微板上只能落到 llvmpipe，
+# 整个 UI 全软件渲染（4K 下一个核打满、肉眼可见卡顿）。Debian/Ubuntu 的 mesa 有 panfrost，所以只有
+# openEuler 这条线需要自带 GL 栈，仍按本项目惯例装进 $PREFIX。
+# 选 24.3 而非 25.x：25.2 把 panfrost 挪到 CLC 预编译着色器路径，需要 SPIRV-Tools >= 2024.1，
+# 而 openEuler 只有 2023.2.1。shared-llvm=disabled 让 LLVM 静态链进驱动，产物不依赖 libLLVM.so.<版本>
+# ——那个 soname 每换一个发行版都不一样，正是本包要跨发行版装的地方。
+log "Step 3.6/14 编译 mesa ${MESA_VER}（panfrost 硬件渲染）"
+cd "$WORK"
+[ -f "mesa-${MESA_VER}.tar.xz" ] || curl -LO "https://archive.mesa3d.org/mesa-${MESA_VER}.tar.xz"
+tar xf "mesa-${MESA_VER}.tar.xz"
+cd "mesa-${MESA_VER}"
+rm -rf build
+# LLVM 静态编进 gallium 的编译单元很吃内存：RK3576 板（3.9G）上 nproc 全开会 OOM，实测 4 并发才稳。
+# 按“1G 内存 1 个并发”限流，再和核数取小，构建机大小都跑得动。
+MESA_JOBS="$(awk -v n="$JOBS" '/MemTotal/{j=int($2/1048576); if (j<1) j=1; if (j<n) n=j; exit} END{print n}' /proc/meminfo)"
+log "  mesa 并发：$MESA_JOBS（内存限流，核数 $JOBS）"
+meson setup build --prefix="$GLFALL" --libdir=lib --buildtype=release -Dplatforms= -Degl=enabled -Degl-native-platform=drm -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=false -Dgallium-drivers=panfrost,llvmpipe -Dvulkan-drivers= -Dglvnd=disabled -Dllvm=enabled -Dshared-llvm=disabled -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=enabled -Dxmlconfig=enabled -Dvideo-codecs= -Dgallium-va=disabled -Dgallium-vdpau=disabled -Dbuild-tests=false
+ninja -C build -j"$MESA_JOBS"
+ninja -C build install
+
+# mesa 只在 src/gallium/targets/dril 里生成 panfrost_dri.so / swrast_dri.so 这些“按驱动命名”的入口，
+# 而 src/meson.build 只有在 with_glx=='dri' 或启用了 x11/xcb 平台时才编那个子目录。这里是纯 GBM 构建，
+# 所以按 dril 出现之前 mesa 自己的老办法摆：dri/<驱动>_dri.so -> ../libgallium-<版本>.so。
+# GBM 只会按这些确切名字 dlopen，缺了 dri/ 目录 Kodi 就绑不上驱动、又掉回 llvmpipe（正是这一步要解决的问题）。
+# 一个 megadriver 里已编入所有 -Dgallium-drivers 的驱动，所以每个名字一条软链就够。
+# 已在 RK3576 板实测：这么摆之后 GL_RENDERER = "Mali-G52 r1 (Panfrost)"。
+mkdir -p "$GLFALL/lib/dri"
+for drv in panfrost swrast kms_swrast; do
+  ln -sf "../libgallium-${MESA_VER}.so" "$GLFALL/lib/dri/${drv}_dri.so"
+done
+
+# 门禁：Kodi GBM 需要的 EGL/GLES2/GBM/panfrost 必须真的落到 $GLFALL/lib，且不得外连发行版 LLVM。
+# 用通配而不是写死 libEGL.so.1：mesa 装的是带版本的实体（libEGL.so.1.0.0），soname 那层是软链。
+for f in libEGL libGLESv2 libgbm; do
+  compgen -G "$GLFALL/lib/${f}.so*" > /dev/null || die "mesa 未安装 ${f}.so*"
+done
+[ -e "$GLFALL/lib/dri/panfrost_dri.so" ] || die "mesa 未摆出 dri/panfrost_dri.so"
+# 只挑实体文件：对着软链（含我们自己摆的 dri/*_dri.so）跑 patchelf，会被"临时文件 + rename"
+# 换成一份 66M 实体顶掉链接；而 mesa 的实体名字带版本号，按 libEGL.so.1 这种写法枚举只会命中软链，
+# 真正的 ELF 反而没打上 RUNPATH——解包到目标机就找不到 libgallium，又掉回 llvmpipe。
+patched=0
+while IFS= read -r f; do
+  if readelf -d "$f" | grep -qE "NEEDED +(libLLVM|libclc|libSPIRV)"; then
+    die "$f 依赖发行版 LLVM/SPIRV，shared-llvm=disabled 未生效"
+  fi
+  # meson 安装时会清掉 build rpath，而兜底目录刻意不进 ld.so.conf：
+  # 解包到目标机后驱动只能靠 RUNPATH 找到 libgallium。
+  patchelf --set-rpath "$GLFALL/lib" "$f"
+  readelf -d "$f" | grep -qF RUNPATH || die "$f 未能写入 RUNPATH"
+  patched=$((patched + 1))
+done < <(find "$GLFALL/lib" -type f -name '*.so*' | sort)
+# EGL + GLESv2 + GBM + libgallium 至少四个实体文件，一个都没打上就是枚举写错了。
+[ "$patched" -ge 4 ] || die "兜底 GL 只打上 $patched 个 RUNPATH，实体库枚举有问题"
+# 刻意不跑 ldconfig：这套 GL 必须对系统加载器保持不可见，只有 Kodi/ffmpeg 的 RUNPATH 指得到它。
+log "  mesa 实体库：$(find "$GLFALL/lib" -type f -name '*.so*' -printf '%f ')"
+log "  mesa 驱动：$(ls "$GLFALL"/lib/dri | tr '\n' ' ')"
 
 #------------------------- Step 4/5 mpp + rga（仅 rkmpp 线）-------------------
 if [ "$MPP_RGA" = "yes" ]; then
@@ -315,6 +382,9 @@ log "Step 11/14 注入 appliance.xml / pulseaudio / systemd 单元"
 BUILD_INFO="$FLAVOR $PKG_VERSION (openeuler-24.03/aarch64)"
 COMPONENTS="Kodi $KODI_BRANCH @$KODI_REV, ffmpeg-rockchip $FF_BRANCH @$FF_REV, dav1d $DAV1D_VER"
 [ "$MPP_RGA" = "yes" ] && COMPONENTS="$COMPONENTS, MPP @$(git -C "$WORK/mpp" rev-parse --short=10 HEAD 2>/dev/null||echo x), RGA @$(git -C "$WORK/rkrga" rev-parse --short=10 HEAD 2>/dev/null||echo x)"
+# 自带 mesa 也进组件清单（System info 与包元数据里都能看到 panfrost 版本）
+gl_so="$(ls "$STAGE$GLFALL"/lib/libgallium-*.so 2>/dev/null | head -1)"
+[ -n "$gl_so" ] && COMPONENTS="$COMPONENTS, mesa $(basename "$gl_so" .so | sed 's/^libgallium-//') (panfrost)"
 APPLIANCE_DIR="$STAGE$PREFIX/share/kodi/system/settings"
 mkdir -p "$APPLIANCE_DIR" "$STAGE$PREFIX/share/pulse-kodi" "$STAGE/usr/lib/systemd/system"
 cp "$SRC/kodi/appliance.xml" "$APPLIANCE_DIR/appliance.xml"
@@ -322,11 +392,24 @@ cp "$SRC/kodi/appliance.xml" "$APPLIANCE_DIR/appliance.xml"
 xml_escape() { local s="$1"; s="${s//&/&amp;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"; printf '%s' "$s"; }
 sed -i "s|@BUILD_INFO@|$(xml_escape "$BUILD_INFO")|g; s|@COMPONENTS@|$(xml_escape "$COMPONENTS")|g" "$APPLIANCE_DIR/appliance.xml"
 cp "$SRC/pulseaudio/system.pa" "$STAGE$PREFIX/share/pulse-kodi/system.pa"
-cp "$SRC"/debian/*.service "$STAGE/usr/lib/systemd/system/"
+# debian/*.service 用的是 dh 的模板名 kodi-rockchip-gbm.<unit>.service；deb 线由 dh_installinit 自动剥前缀，
+# 我们手工装必须自己剥掉，否则 systemctl start kodi 找不到单元（pulseaudio.service 的 WantedBy 也引用 kodi.service）。
+for u in "$SRC"/debian/*.service; do
+  unit="$(basename "$u")"
+  cp "$u" "$STAGE/usr/lib/systemd/system/${unit#kodi-rockchip-gbm.}"
+done
 
 #------------------------- Step 12 RUNPATH ------------------------------------
 log "Step 12/14 写入 RUNPATH（锁定 /usr/local/lib 与 lib64）"
 runpath="$PREFIX/lib:$PREFIX/lib64:$PREFIX/lib/$(gcc -dumpmachine)"
+# 自带 mesa 在兜底目录里（不在 ld.so 搜索路径上），RUNPATH 是唯一能命中它的东西，且必须排第一，
+# 才不会被 /usr/local/lib 里可能存在的系统版 GL 抢走。缺目录说明 Step 3.6 没跑（非 openEuler 线）。
+if [ -d "$STAGE$GLFALL/lib" ]; then
+  runpath="$GLFALL/lib:$runpath"
+  log "  GL 兜底目录已纳入 RUNPATH：$GLFALL/lib"
+else
+  log "  [注意] 无 GL 兜底目录，Kodi 将使用系统 mesa（openEuler 上会是 llvmpipe）"
+fi
 # openEuler 是 lib64 体系：kodi-gbm 可能装在 lib 或 lib64，动态定位
 kodi_bin=""
 for cand in "$STAGE$PREFIX/lib/kodi/kodi-gbm" "$STAGE$PREFIX/lib64/kodi/kodi-gbm"; do
@@ -337,6 +420,10 @@ for elf in "$kodi_bin" "$STAGE$PREFIX/bin/ffmpeg" "$STAGE$PREFIX/bin/ffprobe"; d
   [ -f "$elf" ] || die "RUNPATH 目标缺失: $elf"
   patchelf --set-rpath "$runpath" "$elf"
   readelf -d "$elf" | grep -qF RUNPATH || die "未写入 RUNPATH: $elf"
+  if [ -d "$STAGE$GLFALL/lib" ]; then
+    readelf -d "$elf" | grep -F RUNPATH | grep -qF "$GLFALL/lib" ||
+      die "$elf 的 RUNPATH 没带上 GL 兜底目录，装到板上会掉回 llvmpipe"
+  fi
 done
 
 #------------------------- Step 13 门禁 ---------------------------------------
@@ -439,6 +526,9 @@ if [ "$BUILD_DEB" = "yes" ]; then
   rm -rf "$DEBROOT"
   mkdir -p "$DEBROOT/DEBIAN"
   cp -a "$STAGE/usr" "$DEBROOT/usr"
+  # deb 面向 deepin/Debian/Ubuntu：它们的 mesa 本来就带 panfrost，不需要（也不该）被我们这套
+  # 纯 GBM 的 mesa 顶掉，所以把兜底 GL 从 deb 里摘掉；kodi-gbm 的 RUNPATH 里那条路径不存在即被忽略。
+  rm -rf "$DEBROOT$GLFALL"
   DEB_DEPENDS="libgbm1, libegl1, libgles2, libgl1, libx11-6, libxext6, libxrandr2, libxinerama1, libxv1, libxt6, libxkbcommon0, libwayland-client0, libasound2t64 | libasound2, libpulse0, libdrm2, libinput10, libstdc++6, libc6, zlib1g"
   {
     echo "Package: kodi-rockchip-gbm"

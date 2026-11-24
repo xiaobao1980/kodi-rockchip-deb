@@ -39,6 +39,8 @@ jobs:
           - { id: 'trixie', image: 'debian:trixie' }
           - { id: 'forky', image: 'debian:forky' }
           - { id: 'resolute', image: 'ubuntu:resolute' }
+          # openEuler: glibc 2.38 baseline, and the only one of these that yields a native .rpm (plus a cross-distro .deb).
+          - { id: 'openeuler-24.03', image: 'openeuler/openeuler:24.03' }
         ffmpeg:
           - { branch: '8.1', id: '81rkmpp', flavor: 'rkmpp', extraTag: 'rkmpp' }
           - { branch: 'n9.0.2', id: '902v4l2requests', flavor: 'v4l2requests', extraTag: 'v4l2requests' }
@@ -86,6 +88,14 @@ jobs:
           name: deb-${{ matrix.distro.id }}-ffmpeg-${{ matrix.ffmpeg.id }}
           path: out/*.deb
 
+      # Only the openEuler leg builds RPMs; the glob would simply match nothing elsewhere.
+      - name: Upload rpm as artifact ${{ matrix.arch.name }} ${{ matrix.distro.id }}
+        if: matrix.distro.id == 'openeuler-24.03'
+        uses: actions/upload-artifact@v7
+        with:
+          name: rpm-${{ matrix.distro.id }}-ffmpeg-${{ matrix.ffmpeg.id }}
+          path: out/*.rpm
+
       # Login to ghcr.io to push the container image
       - name: Login to ghcr.io
         uses: docker/login-action@v4
@@ -130,6 +140,14 @@ jobs:
           pattern: deb-*
           merge-multiple: true
 
+      - uses: actions/download-artifact@v8
+        name: Download rpm artifacts
+        continue-on-error: true # only the openEuler leg produces these; missing means that leg did not finish
+        with:
+          path: out
+          pattern: rpm-*
+          merge-multiple: true
+
       - name: List artifacts downloaded
         run: |
           ls -lahtR
@@ -144,3 +162,4 @@ jobs:
           title: "${{needs.prepare.outputs.created}}"
           files: |
             out/*.deb
+            out/*.rpm
