@@ -91,7 +91,14 @@ log "Step 0/14 前置检查"
 if [ "${FLAVOR}" = "rkmpp" ] && [ "${SKIP_MPP_CHECK:-0}" != "1" ]; then
   ls /dev/mpp_service >/dev/null 2>&1 || die "无 /dev/mpp_service，本机不是 vendor 内核；mainline 请走 v4l2requests 线（纯编译可 SKIP_MPP_CHECK=1）"
 fi
-glibc_ver=$(ldd --version | head -1 | grep -oP '[0-9]+\.[0-9]+$')
+# 不用 head -1：pipefail 下 head 提前收工会让 ldd（本身是 shell 脚本，分多次写）吃到 SIGPIPE，
+# 整条管道以 141 退出并被 set -e 杀掉，且只在写第二行赶在 head 退出之后时复现——时好时坏的源头。
+# awk 读完全部输入才退出，不存在这个问题。
+glibc_ver=$(ldd --version 2>/dev/null | awk 'NR==1{print $NF}')
+case "$glibc_ver" in
+  *[0-9]*) ;;
+  *) die "取不到构建机 glibc 版本（ldd --version 输出异常）" ;;
+esac
 log "构建机 glibc = $glibc_ver（须为三目标中最低，当前 openEuler 24.03 = 2.38）"
 command -v dnf >/dev/null || die "本脚本按 openEuler/dnf 编写"
 [ "${BUILD_RPM}" = "yes" ] && { command -v rpmbuild >/dev/null || dnf install -y rpm-build >/dev/null 2>&1 || die "需要 rpmbuild（dnf install rpm-build）"; }
@@ -383,7 +390,7 @@ BUILD_INFO="$FLAVOR $PKG_VERSION (openeuler-24.03/aarch64)"
 COMPONENTS="Kodi $KODI_BRANCH @$KODI_REV, ffmpeg-rockchip $FF_BRANCH @$FF_REV, dav1d $DAV1D_VER"
 [ "$MPP_RGA" = "yes" ] && COMPONENTS="$COMPONENTS, MPP @$(git -C "$WORK/mpp" rev-parse --short=10 HEAD 2>/dev/null||echo x), RGA @$(git -C "$WORK/rkrga" rev-parse --short=10 HEAD 2>/dev/null||echo x)"
 # 自带 mesa 也进组件清单（System info 与包元数据里都能看到 panfrost 版本）
-gl_so="$(ls "$STAGE$GLFALL"/lib/libgallium-*.so 2>/dev/null | head -1)"
+gl_so="$(ls "$STAGE$GLFALL"/lib/libgallium-*.so 2>/dev/null | awk 'NR==1')"
 [ -n "$gl_so" ] && COMPONENTS="$COMPONENTS, mesa $(basename "$gl_so" .so | sed 's/^libgallium-//') (panfrost)"
 APPLIANCE_DIR="$STAGE$PREFIX/share/kodi/system/settings"
 mkdir -p "$APPLIANCE_DIR" "$STAGE$PREFIX/share/pulse-kodi" "$STAGE/usr/lib/systemd/system"

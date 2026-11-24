@@ -88,7 +88,7 @@ BUILD_INFO="${FLAVOR} ${PACKAGE_VERSION} (${OS_ID}/${OS_ARCH})"
 COMPONENTS="Kodi ${KODI_BRANCH} @$(rev kodi), ${FFMPEG_NAME} ${FFMPEG_BRANCH} @$(rev ffmpeg), dav1d ${DAV1D_BRANCH}${rev_extra}"
 # The openEuler leg also carries its own GL fallback (see the Dockerfile/bare-metal mesa step). Name the
 # version in the metadata so System info, the appliance build stamp and the package agree.
-gl_so="$(ls "${STAGE}${PREFIX}"/share/kodi-rockchip/glfallback/lib/libgallium-*.so 2> /dev/null | head -1)"
+gl_so="$(ls "${STAGE}${PREFIX}"/share/kodi-rockchip/glfallback/lib/libgallium-*.so 2> /dev/null | awk 'NR==1')"
 [ -n "${gl_so}" ] && COMPONENTS="${COMPONENTS}, mesa $(basename "${gl_so}" .so | sed 's/^libgallium-//') (panfrost)"
 
 appliances=("${STAGE}${PREFIX}/share/kodi/system/settings/appliance.xml" "${STAGE}${PREFIX}/lib64/kodi/system/settings/appliance.xml")
