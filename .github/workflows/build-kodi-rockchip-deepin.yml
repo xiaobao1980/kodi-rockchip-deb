@@ -10,6 +10,10 @@ on:
   push:
     tags: ['kodi-v*']
 
+# Release 步骤要写 GitHub Release，仓库默认 token 权限若是 read 就会 403。
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
@@ -34,10 +38,17 @@ jobs:
           done
           ls -l out
 
+      # 分支名里的 / 不能进 artifact 名（NTFS 限制），从 tag 触发时不受影响。
+      - name: 计算 artifact 名
+        id: art
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "name=kodi-rockchip-gbm-deepin-$(printf '%s' "$REF_NAME" | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
       - name: 上传产物 Artifact（保留 90 天）
         uses: actions/upload-artifact@v4
         with:
-          name: kodi-rockchip-gbm-deepin-${{ github.ref_name }}
+          name: ${{ steps.art.outputs.name }}
           path: out/*.deb
 
       - name: 打 tag 时发布 Release
