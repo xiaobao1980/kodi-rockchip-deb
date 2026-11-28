@@ -165,9 +165,17 @@ Optional, from the same repo, for the bits the `.deb` would otherwise set up on 
   `system.pa` as the `.deb`; run Kodi with `--audio-backend=pulseaudio` and `--env PULSE_SERVER=127.0.0.1`
 - `ghcr.io/armsurvivors/kodi-rockchip-deb/avahi:<distro>-latest`: Avahi daemon, for Zeroconf
 - `ghcr.io/armsurvivors/kodi-rockchip-deb/sendspin:<distro>-latest`:
-  [Sendspin](https://github.com/Sendspin/sendspin-cli) multi-room audio daemon (plays via the PulseAudio container)
+  [Sendspin](https://github.com/Sendspin/sendspin-python-cli) multi-room audio daemon (plays via the PulseAudio
+  container); always the latest sendspin release from PyPI at build time
 
 Run them the same way (`--privileged --network host --volume /dev:/dev --volume /run:/run`).
+
+They are rebuilt weekly. Each build is also tagged `<distro>-<YYYYMMDD-HHMM>` (eg. `trixie-20261201-0030`), so
+you can pin a specific build instead of following `-latest`.
+
+> ℹ️ sendspin 8.0+ needs Music Assistant 2.10.8 or newer. The player gets a new identity, so Music Assistant
+> sees it as a new player and you need to re-add it to groups. `--id` is gone; the identity is kept in the
+> `sendspin-config` volume (`/root/.config/sendspin`).
 
 ### Docker Compose
 
@@ -180,7 +188,7 @@ Ready-made stacks under [`deploy/docker-compose/`](deploy/docker-compose):
 In the chosen directory:
 
 ```bash
-cp .env.example .env   # set the ALSA card ID, Sendspin identity, IR receiver, etc.
+cp .env.example .env   # set the ALSA card ID, Sendspin name, IR receiver, etc.
 docker compose up -d
 ```
 
@@ -199,9 +207,11 @@ your flavor and your distro. Files are named
 
 Both flavors install as the same package (`kodi-rockchip-gbm`), so only one can be installed at a time.
 
-Each build also produces an ffmpeg-only package, `kodi-rockchip-gbm-ffmpeg_arm64_ffmpeg_<ffmpeg>_<distro>.deb`: the same
-`ffmpeg`/`ffprobe` (and the `/usr/local` libraries they need) without Kodi, for other users of the hardware decoders.
-It conflicts with `kodi-rockchip-gbm`, which already contains them.
+The `ffmpeg`/`ffprobe` command line tools are in a separate, optional package,
+`ffmpeg-kodi-rockchip-gbm_arm64_ffmpeg_<ffmpeg>_<distro>.deb`, from the same build. It works with or without Kodi
+installed (no dependency either way), for other users of the hardware decoders. It ships private copies of the
+libraries it needs in `/usr/local/lib/ffmpeg-kodi-rockchip-gbm`, so it shares no files with `kodi-rockchip-gbm`.
+Install it with `sudo apt install ./ffmpeg-kodi-rockchip-gbm_*.deb`. The container image includes both.
 
 - From an SSH or console connection (not in X11 or Wayland):
     - ✅ install with `sudo apt install ./kodi-rockchip-gbm_*.deb` -- it will pull in a ton of dependencies
