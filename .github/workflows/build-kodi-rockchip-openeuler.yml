@@ -1,12 +1,18 @@
 # .github/workflows/build-kodi-rockchip-openeuler.yml
-# 在 arm 运行器上用 openEuler 24.03 容器构建 Kodi-rockchip-gbm，产出 rpm + deb。
-# 关键：作业容器用 openEuler 24.03，保证 glibc 2.38 基线，产物才能回 openEuler / deepin 25 跑。
+# 在 arm 运行器上用 openEuler 24.03 容器构建 Kodi-rockchip-gbm，只产出 rpm。
+# 关键：作业容器用 openEuler 24.03，保证 glibc 2.38 基线，产物才能回 openEuler 跑。
+# 同一棵树顺带编出来的跨发行版 .deb（给 deepin 25 等 Debian 系）不在这条线发布，
+# 见 build-kodi-rockchip-deepin.yml。
 name: build-kodi-rockchip-openeuler
 
 on:
   workflow_dispatch:
   push:
     tags: ['kodi-v*']
+
+# Release 步骤要写 GitHub Release，仓库默认 token 权限若是 read 就会 403。
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -16,27 +22,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 一键编译（容器内无 /dev/mpp_service，跳过设备门禁；仅产 rpm+deb）
+      - name: 一键编译（容器内无 /dev/mpp_service，跳过设备门禁；仅产 rpm）
         env:
           SKIP_MPP_CHECK: '1'
           BUILD_RPM: 'yes'
-          BUILD_DEB: 'yes'
+          BUILD_DEB: 'no'
           BUILD_TAR: 'no'
           FLAVOR: 'rkmpp'
         run: bash build-kodi-rockchip-openeuler.sh
 
+      # 分支名里的 / 不能进 artifact 名（NTFS 限制），从 tag 触发时不受影响。
+      - name: 计算 artifact 名
+        id: art
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "name=kodi-rockchip-gbm-$(printf '%s' "$REF_NAME" | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
       - name: 上传产物 Artifact（保留 90 天）
         uses: actions/upload-artifact@v4
         with:
-          name: kodi-rockchip-gbm-${{ github.ref_name }}
-          path: |
-            out/*.rpm
-            out/*.deb
+          name: ${{ steps.art.outputs.name }}
+          path: out/*.rpm
 
       - name: 打 tag 时发布 Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            out/*.rpm
-            out/*.deb
+          files: out/*.rpm

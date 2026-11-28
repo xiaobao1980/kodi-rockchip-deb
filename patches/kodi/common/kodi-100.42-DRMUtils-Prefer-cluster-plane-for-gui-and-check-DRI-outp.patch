@@ -1,0 +1,285 @@
+Kodi GBM 平面选择修复：解决 RK3576 接 4K 屏时 4K 视频花屏
+
+现象：openEuler 版（mesa 24.3.4，GBM 返回 LINEAR）在 3840x2160 桌面下播放
+4K 片源花屏；Armbian 版（mesa 25.0.7，GBM 返回 AFBC）同硬件同代码却正常。
+
+根因（两块板 VOP2 平面能力逐行一致，与硬件/内核无关）：
+1. CDRMPlane::Check 只校验 INPUT_WIDTH/INPUT_HEIGHT，从不看 OUTPUT_WIDTH/
+   OUTPUT_HEIGHT。RK3576 上 Esmart0(id 59, primary) 可输出 4096，而
+   Esmart2(id 104) 输出宽度上限只有 2048；SCALE_RATE 恒为 range[8..8]，
+   无法用来判别缩放能力，OUTPUT_* 是唯一可用判据。
+2. FindGuiPlane 按枚举顺序取第一个通过的平面。GUI 用 LINEAR 时任何平面都
+   兼容，于是抢走 59；FindVideoAndGuiPlane 的内层又只按视频源尺寸校验，
+   把 4K 输出判给 104。内核 atomic check 拒绝 dst 3840，视频平面失效而
+   primary 仍在刷新 -> 花屏。102 正常纯属侥幸：AFBC 只有 Cluster 支持，
+   逼着 GUI 去了 138、视频拿到 59。
+
+修复（仅作用于 DRM 驱动名为 rockchip 的平台，其余平台行为不变）：
+- Check 增加 dstW/dstH 可选参数（默认取源尺寸），校验 OUTPUT_WIDTH/
+  OUTPUT_HEIGHT 上限，从源头拒绝输出尺寸超限的平面。
+- 新增 QUIRK_GUI_PREFER_OVERLAY，FindGuiPlane 与 FindVideoAndGuiPlane 第一
+  轮跳过 primary 平面，把唯一可输出整帧 4K 的 Esmart0 留给 D2P 视频；
+  整轮无解时回退允许 primary，不比现状差。
+
+预期分配：4K 屏 gui=138(Cluster)/video=59(Esmart0)，1080p 屏 gui=104/video=59。
+
+diff --git a/xbmc/windowing/gbm/drm/DRMPlane.cpp b/xbmc/windowing/gbm/drm/DRMPlane.cpp
+index b2eb5eb..fc378cf 100644
+--- a/xbmc/windowing/gbm/drm/DRMPlane.cpp
++++ b/xbmc/windowing/gbm/drm/DRMPlane.cpp
+@@ -110,8 +110,14 @@ void CDRMPlane::FindModifiers()
+     drmModeFreePropertyBlob(blob);
+ }
+ 
+-bool CDRMPlane::Check(
+-    uint64_t w, uint64_t h, uint32_t format, uint64_t modifier, CDRMCrtc* crtc, PlaneType type)
++bool CDRMPlane::Check(uint64_t w,
++                      uint64_t h,
++                      uint32_t format,
++                      uint64_t modifier,
++                      CDRMCrtc* crtc,
++                      PlaneType type,
++                      uint64_t dstW,
++                      uint64_t dstH)
+ {
+   if (crtc != nullptr && !(m_plane->possible_crtcs & (1 << crtc->GetOffset())))
+     return false;
+@@ -149,6 +155,33 @@ bool CDRMPlane::Check(
+   if (!input_height_limits && plane_type == PLANE_TYPE_CURSOR)
+     return false;
+ 
++  /*
++   * Planes whose output side is limited further than the input side (rockchip
++   * vop2 Esmart2/Esmart3 scan out at most 2048 pixels wide) cannot drive a mode
++   * wider than that, even though the source buffer fits. The atomic test would
++   * reject such a commit later on, so filter the plane out here.
++   */
++  if (dstW == 0)
++    dstW = w;
++  if (dstH == 0)
++    dstH = h;
++
++  auto output_width_limits = GetRangePropertyLimits("OUTPUT_WIDTH");
++  if (output_width_limits && output_width_limits->second < dstW)
++  {
++    CLog::LogF(LOGDEBUG, "plane {} cannot output {} pixels wide (max {})", GetId(), dstW,
++               output_width_limits->second);
++    return false;
++  }
++
++  auto output_height_limits = GetRangePropertyLimits("OUTPUT_HEIGHT");
++  if (output_height_limits && output_height_limits->second < dstH)
++  {
++    CLog::LogF(LOGDEBUG, "plane {} cannot output {} pixels high (max {})", GetId(), dstH,
++               output_height_limits->second);
++    return false;
++  }
++
+   return true;
+ }
+ 
+diff --git a/xbmc/windowing/gbm/drm/DRMPlane.h b/xbmc/windowing/gbm/drm/DRMPlane.h
+index 173a23b..6ff7679 100644
+--- a/xbmc/windowing/gbm/drm/DRMPlane.h
++++ b/xbmc/windowing/gbm/drm/DRMPlane.h
+@@ -51,10 +51,17 @@ public:
+ 
+   bool SupportsFormat(uint32_t format);
+   bool SupportsFormatAndModifier(uint32_t format, uint64_t modifier);
+-  bool Check(
+-      uint64_t w, uint64_t h, uint32_t format, uint64_t modifier, CDRMCrtc* crtc, PlaneType type);
++  // w/h is the source buffer size, dstW/dstH the rectangle scanned out on the crtc.
++  // They differ whenever the plane scales; dst defaults to the source size.
++  bool Check(uint64_t w, uint64_t h, uint32_t format, uint64_t modifier, CDRMCrtc* crtc,
++             PlaneType type, uint64_t dstW = 0, uint64_t dstH = 0);
+   bool MoveOnTopOf(CDRMPlane* other);
+ 
++  PlaneType GetPlaneType() const
++  {
++    return static_cast<PlaneType>(GetPropertyValue("type").value_or(PLANE_TYPE_UNKNOWN));
++  }
++
+ private:
+   struct DrmModePlaneDeleter
+   {
+diff --git a/xbmc/windowing/gbm/drm/DRMUtils.cpp b/xbmc/windowing/gbm/drm/DRMUtils.cpp
+index 7bdf60e..498697e 100644
+--- a/xbmc/windowing/gbm/drm/DRMUtils.cpp
++++ b/xbmc/windowing/gbm/drm/DRMUtils.cpp
+@@ -199,28 +199,42 @@ bool CDRMUtils::FindGuiPlane(uint32_t format, uint64_t modifier)
+     return true;
+   }
+ 
+-  for (auto& crtc : m_encoder->GetPossibleCrtcs(m_crtcs, m_crtc))
++  // Quirked platforms have a single scalable primary plane that the gui does not
++  // need, so look for an overlay/cluster plane first and only fall back to the
++  // primary plane when nothing else can host the gui.
++  const int passes =
++      HasQuirk(QUIRK_GUI_PREFER_OVERLAY) && plane_type != PLANE_TYPE_PRIMARY ? 2 : 1;
++
++  for (int pass = 0; pass < passes; pass++)
+   {
+-    for (auto& plane : m_planes)
++    const bool skipPrimary = pass == 0 && passes == 2;
++
++    for (auto& crtc : m_encoder->GetPossibleCrtcs(m_crtcs, m_crtc))
+     {
+-      if (m_video_plane && m_video_plane->GetId() == plane.get()->GetId())
+-        continue;
++      for (auto& plane : m_planes)
++      {
++        if (m_video_plane && m_video_plane->GetId() == plane.get()->GetId())
++          continue;
+ 
+-      if (!plane->Check(res.iWidth, res.iHeight, format, modifier, crtc, plane_type))
+-        continue;
++        if (skipPrimary && plane->GetPlaneType() == PLANE_TYPE_PRIMARY)
++          continue;
+ 
+-      plane->SetFormat(format);
+-      plane->SetModifier(modifier);
+-      m_old_crtc = m_crtc;
+-      m_crtc = crtc;
+-      if (m_video_plane)
+-        CLog::LogF(LOGWARNING, "gui plane moved, releasing live D2P video plane reservation");
+-      m_video_plane = nullptr;
+-      m_gui_plane = plane.get();
+-      CLog::LogF(LOGINFO, "Using gui plane [{}x{}] id:{}, format:{}, modifier:{}, crtc id:{}",
+-                 res.iWidth, res.iHeight, m_gui_plane->GetId(), DRMHELPERS::FourCCToString(format),
+-                 DRMHELPERS::ModifierToString(modifier), m_crtc->GetId());
+-      return true;
++        if (!plane->Check(res.iWidth, res.iHeight, format, modifier, crtc, plane_type))
++          continue;
++
++        plane->SetFormat(format);
++        plane->SetModifier(modifier);
++        m_old_crtc = m_crtc;
++        m_crtc = crtc;
++        if (m_video_plane)
++          CLog::LogF(LOGWARNING, "gui plane moved, releasing live D2P video plane reservation");
++        m_video_plane = nullptr;
++        m_gui_plane = plane.get();
++        CLog::LogF(LOGINFO, "Using gui plane [{}x{}] id:{}, format:{}, modifier:{}, crtc id:{}",
++                   res.iWidth, res.iHeight, m_gui_plane->GetId(), DRMHELPERS::FourCCToString(format),
++                   DRMHELPERS::ModifierToString(modifier), m_crtc->GetId());
++        return true;
++      }
+     }
+   }
+ 
+@@ -318,43 +332,61 @@ bool CDRMUtils::FindVideoAndGuiPlane(uint32_t format,
+   {
+     if (m_video_plane == m_gui_plane)
+       CLog::LogF(LOGERROR, "m_video_plane and m_gui_plane are identical");
+-    else if (m_video_plane->Check(width, height, format, modifier, m_crtc, PLANE_TYPE_ANY))
++    else if (m_video_plane->Check(width, height, format, modifier, m_crtc, PLANE_TYPE_ANY,
++                                  res.iWidth, res.iHeight))
+       return true;
+   }
+ 
+-  for (auto& crtc : m_encoder->GetPossibleCrtcs(m_crtcs, m_crtc))
++  // Quirked platforms have a single scalable primary plane that the gui does not
++  // need, so try to host the gui on an overlay/cluster plane first and only fall
++  // back to the primary plane when no other combination works.
++  const int passes =
++      HasQuirk(QUIRK_GUI_PREFER_OVERLAY) && plane_type != PLANE_TYPE_PRIMARY ? 2 : 1;
++
++  for (int pass = 0; pass < passes; pass++)
+   {
+-    for (auto& gui_plane : m_planes)
+-    {
+-      if (!gui_plane->Check(res.iWidth, res.iHeight, m_gui_plane->GetFormat(),
+-                            m_gui_plane->GetModifier(), crtc, plane_type))
+-        continue;
++    const bool skipPrimary = pass == 0 && passes == 2;
+ 
+-      for (auto& video_plane : m_planes)
++    for (auto& crtc : m_encoder->GetPossibleCrtcs(m_crtcs, m_crtc))
++    {
++      for (auto& gui_plane : m_planes)
+       {
+-        if (video_plane->GetId() == gui_plane->GetId() ||
+-            !video_plane->Check(width, height, format, modifier, crtc, PLANE_TYPE_ANY) ||
+-            !gui_plane->MoveOnTopOf(video_plane.get()))
++        if (skipPrimary && gui_plane->GetPlaneType() == PLANE_TYPE_PRIMARY)
+           continue;
+ 
+-        gui_plane->SetFormat(m_gui_plane->GetFormat());
+-        gui_plane->SetModifier(m_gui_plane->GetModifier());
+-        video_plane->SetFormat(format);
+-        video_plane->SetModifier(modifier);
+-
+-        m_old_crtc = m_crtc;
+-        m_crtc = crtc;
+-
+-        m_gui_plane = gui_plane.get();
+-        m_video_plane = video_plane.get();
++        if (!gui_plane->Check(res.iWidth, res.iHeight, m_gui_plane->GetFormat(),
++                              m_gui_plane->GetModifier(), crtc, plane_type))
++          continue;
+ 
+-        CLog::LogF(LOGINFO,
+-                   "Using gui plane [{}x{}] id:{}, video plane [{}x{}] id:{} on "
+-                   "crtc id:{} for video format:{}, video modifier:{}",
+-                   res.iWidth, res.iHeight, m_gui_plane->GetId(), width, height,
+-                   m_video_plane->GetId(), m_crtc->GetId(), DRMHELPERS::FourCCToString(format),
+-                   DRMHELPERS::ModifierToString(modifier));
+-        return true;
++        for (auto& video_plane : m_planes)
++        {
++          // the video plane has to scale the source to the desktop resolution,
++          // so both the source and the scan-out size must fit its limits
++          if (video_plane->GetId() == gui_plane->GetId() ||
++              !video_plane->Check(width, height, format, modifier, crtc, PLANE_TYPE_ANY, res.iWidth,
++                                  res.iHeight) ||
++              !gui_plane->MoveOnTopOf(video_plane.get()))
++            continue;
++
++          gui_plane->SetFormat(m_gui_plane->GetFormat());
++          gui_plane->SetModifier(m_gui_plane->GetModifier());
++          video_plane->SetFormat(format);
++          video_plane->SetModifier(modifier);
++
++          m_old_crtc = m_crtc;
++          m_crtc = crtc;
++
++          m_gui_plane = gui_plane.get();
++          m_video_plane = video_plane.get();
++
++          CLog::LogF(LOGINFO,
++                     "Using gui plane [{}x{}] id:{}, video plane [{}x{}] id:{} on "
++                     "crtc id:{} for video format:{}, video modifier:{}",
++                     res.iWidth, res.iHeight, m_gui_plane->GetId(), width, height,
++                     m_video_plane->GetId(), m_crtc->GetId(), DRMHELPERS::FourCCToString(format),
++                     DRMHELPERS::ModifierToString(modifier));
++          return true;
++        }
+       }
+     }
+   }
+@@ -482,6 +514,8 @@ bool CDRMUtils::OpenDrm(bool needConnector)
+     {
+       if (strcmp(version->name, "amdgpu") == 0)
+         m_drm_quirks |= QUIRK_NEEDSPRIMARY;
++      else if (strcmp(version->name, "rockchip") == 0)
++        m_drm_quirks |= QUIRK_GUI_PREFER_OVERLAY;
+       drmFreeVersion(version);
+     }
+ 
+diff --git a/xbmc/windowing/gbm/drm/DRMUtils.h b/xbmc/windowing/gbm/drm/DRMUtils.h
+index 7f454b1..504c341 100644
+--- a/xbmc/windowing/gbm/drm/DRMUtils.h
++++ b/xbmc/windowing/gbm/drm/DRMUtils.h
+@@ -37,6 +37,12 @@ constexpr const char* SETTING_VIDEOSCREEN_COLORRANGE = "videoscreen.colorrange";
+ // amdgpu drm driver needs at least 1 primary plane to active when doing a modeset
+ inline constexpr int QUIRK_NEEDSPRIMARY = 1 << 0;
+ 
++// rockchip vop2 exposes exactly one smart (scaling) primary plane, and on a 4K
++// mode it is the only plane able to scan the whole frame out. The gui only needs
++// a cluster plane, so keep the primary plane free for direct-to-plane video and
++// fall back to the primary plane only when nothing else can host the gui.
++inline constexpr int QUIRK_GUI_PREFER_OVERLAY = 1 << 1;
++
+ struct drm_fb
+ {
+   struct gbm_bo* bo = nullptr;

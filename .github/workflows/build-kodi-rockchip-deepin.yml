@@ -1,0 +1,58 @@
+# .github/workflows/build-kodi-rockchip-deepin.yml
+# deepin 25 构建线，结构参考 build-kodi-rockchip-openeuler.yml，只产出 .deb。
+# 构建容器仍用 openEuler 24.03：它是三个目标里 glibc 最低的（2.38），在这上面编出来的
+# 二进制 deepin 25 / Debian trixie·forky / Ubuntu resolute·noble 都能直接跑；反过来不行。
+# 因此这里不换成 deepin 自家镜像，只把产物按 deepin-25 命名发布。
+name: build-kodi-rockchip-deepin
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['kodi-v*']
+
+# Release 步骤要写 GitHub Release，仓库默认 token 权限若是 read 就会 403。
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: openeuler/openeuler:24.03
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 一键编译（容器内无 /dev/mpp_service，跳过设备门禁；仅产 deb）
+        env:
+          SKIP_MPP_CHECK: '1'
+          BUILD_RPM: 'no'
+          BUILD_DEB: 'yes'
+          BUILD_TAR: 'no'
+          FLAVOR: 'rkmpp'
+        run: bash build-kodi-rockchip-openeuler.sh
+
+      - name: 产物按 deepin-25 命名
+        run: |
+          for d in out/*.deb; do
+            [ -e "$d" ] && mv -v "$d" "${d%.deb}_deepin-25.deb"
+          done
+          ls -l out
+
+      # 分支名里的 / 不能进 artifact 名（NTFS 限制），从 tag 触发时不受影响。
+      - name: 计算 artifact 名
+        id: art
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "name=kodi-rockchip-gbm-deepin-$(printf '%s' "$REF_NAME" | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: 上传产物 Artifact（保留 90 天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.art.outputs.name }}
+          path: out/*.deb
+
+      - name: 打 tag 时发布 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.deb

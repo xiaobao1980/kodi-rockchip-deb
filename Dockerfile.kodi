@@ -19,7 +19,37 @@ FROM ${BASE_IMAGE} AS base
 ENV DEBIAN_FRONTEND=noninteractive
 ENV FORCE_COLOR=1
 
+# We build into /usr/local, so declare its pkgconfig dirs early: openEuler is a lib64 distro and its pkg-config
+# defaults miss /usr/local/lib, so dav1d/mpp/rga would be invisible to ffmpeg's and Kodi's configure.
+# pkg-config treats PKG_CONFIG_PATH as extra search dirs, so this is a no-op on Debian/Ubuntu.
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig"
+
+#### OS dispatch: deb family (apt + debuild) vs openEuler (dnf + rpmbuild/dpkg-deb). Everything below branches on it.
+RUN <<-OS_DISPATCH
+. /etc/os-release
+case "${ID}" in
+	debian | ubuntu)
+		os_id="${VERSION_CODENAME}"
+		pkg_family="deb"
+		;;
+	openEuler)
+		# VERSION_ID is "24.03"; lsb_release is not installed there, so OS_ID is our distro stamp everywhere.
+		os_id="openeuler-${VERSION_ID}"
+		pkg_family="rpm"
+		;;
+	*)
+		echo "ERROR: unsupported base image: ID=${ID} PRETTY_NAME=${PRETTY_NAME} (supported: debian, ubuntu, openEuler)" >&2
+		exit 1
+		;;
+esac
+mkdir -p /src
+printf 'OS_ID=%s\nPKG_FAMILY=%s\n' "${os_id}" "${pkg_family}" > /src/os-info.env
+echo "Build target: ${PRETTY_NAME} -> OS_ID=${os_id} PKG_FAMILY=${pkg_family}"
+OS_DISPATCH
+
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked --mount=type=cache,target=/var/lib/apt,sharing=locked <<-ALL_DEB_DEPS
+. /src/os-info.env
+[ "${PKG_FAMILY}" = "deb" ] || { echo "Not a deb-family base: skipping apt deps"; exit 0; }
 
 ls -laR  /etc/apt/apt.conf.d; for ja in /etc/apt/apt.conf.d/*; do echo "APT CONF.D ITEM: $ja"; cat "$ja"; done
 rm -rfv /etc/apt/apt.conf.d/docker-clean /etc/apt/apt.conf.d/docker-gzip-indexes
@@ -75,6 +105,76 @@ du -h /var/lib/apt
 
 ALL_DEB_DEPS
 
+# openEuler deps. RHEL-style names (xz-devel, not liblzma-dev); dnf_install checks each name against the
+# enabled repos and only installs what exists, so one run surfaces every name issue instead of aborting
+# on the first unknown package. rpm-build/dpkg are needed later to emit .rpm and .deb from this same tree.
+RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked --mount=type=cache,target=/var/lib/dnf,sharing=locked <<-ALL_DNF_DEPS
+. /src/os-info.env
+[ "${PKG_FAMILY}" = "rpm" ] || { echo "Not openEuler: skipping dnf deps"; exit 0; }
+
+# POSIX sh (this runs before any SHELL directive): word lists, no arrays. Package names have no spaces.
+dnf_install() {
+	avail=""
+	missing=""
+	for p in $*; do
+		if dnf -q list --available "$p" > /dev/null 2>&1; then
+			avail="$avail $p"
+		else
+			missing="$missing $p"
+			echo "  [missing] $p (no such name in the enabled repos; the matching Kodi feature is disabled below)"
+		fi
+	done
+	if [ -n "$avail" ]; then
+		dnf install -y $avail > /dev/null 2>&1 || { echo "ERROR: dnf install failed for:$avail" >&2; exit 1; }
+	fi
+	if [ -n "$missing" ]; then
+		printf '%s\n' $missing >> /src/missing-deps.txt
+		echo "  missing deps recorded in /src/missing-deps.txt"
+	fi
+}
+
+# Toolchain + what Kodi's GBM/GLES build needs.
+dnf_install \
+	gcc gcc-c++ make cmake meson ninja-build git pkgconf pkgconf-pkg-config \
+	nasm yasm gperf bison gettext autoconf automake libtool patch \
+	wget curl zip unzip tar bzip2 rsync python3 python3-devel python3-pip \
+	patchelf tree gawk \
+	zlib-devel bzip2-devel xz-devel libtool-devel \
+	libdrm-devel hwdata \
+	alsa-lib-devel pulseaudio-libs-devel libass-devel freetype-devel fribidi-devel fontconfig-devel harfbuzz-devel \
+	libjpeg-turbo-devel libpng-devel libtiff-devel giflib-devel \
+	libogg-devel libvorbis-devel flac-devel \
+	openssl-devel gnutls-devel libgcrypt-devel libgpg-error-devel \
+	sqlite-devel taglib-devel libzip-devel libxml2-devel libxslt-devel pcre2-devel \
+	util-linux-devel libuuid-devel libcap-devel expat-devel libunistring-devel libcurl-devel \
+	libX11-devel libXext-devel libXrandr-devel libXinerama-devel libXv-devel libXt-devel \
+	libxkbcommon-devel wayland-devel wayland-protocols-devel \
+	mesa-libEGL-devel libglvnd-devel mesa-libgbm-devel mesa-libGL-devel mesa-libGLU-devel \
+	libinput-devel dbus-devel systemd-devel \
+	avahi-devel bluez-devel exiv2-devel libplist-devel libbluray-devel libcdio-devel \
+	rapidjson-devel nlohmann-json-devel spdlog-devel fmt-devel lcms2-devel lzo-devel \
+	libarchive-devel libmicrohttpd-devel tinyxml-devel tinyxml2-devel \
+	libnfs-devel samba-devel
+
+# Extra deps for the bundled mesa build below (openEuler's own mesa has no panfrost). zstd-devel comes
+# with llvm-devel today, but naming it keeps the mesa step from silently depending on that.
+dnf_install llvm-devel zstd-devel byacc flex python3-mako python3-ply python3-pyyaml
+
+# Optional: absent means Kodi loses that feature (the cmake line below already disables what openEuler lacks).
+for p in libcec-devel lirc-devel mariadb-devel rtmpdump-devel lame-devel enca-devel; do
+	if dnf -q list --available "$p" > /dev/null 2>&1 && dnf install -y "$p" > /dev/null 2>&1; then
+		echo "  optional $p installed"
+	else
+		echo "  [skip] optional $p unavailable"
+	fi
+done
+
+# Packaging tools (not in the container by default; without them rpm/deb output silently disappears).
+dnf_install rpm-build dpkg
+
+echo "glibc: $(ldd --version | head -1)"
+ALL_DNF_DEPS
+
 
 #### Common git clones. Heavy stuff.
 ARG DAV1D_BRANCH
@@ -96,9 +196,100 @@ WORKDIR /src/dav1d
 RUN meson setup build --prefix=/usr/local --libdir=lib --buildtype=release --default-library=shared -Denable_tools=false -Denable_tests=false && \
     ninja -C build install
 
-# Libdisplay-info, a hard dependency for kodi GBM.
+# Libdisplay-info, a hard dependency for kodi GBM. --libdir=lib keeps it next to dav1d on lib64 distros.
 WORKDIR /src/libdisplay-info
-RUN mkdir build && cd build && meson setup --prefix=/usr/local --buildtype=release .. && ninja && ninja install
+RUN mkdir build && cd build && meson setup --prefix=/usr/local --libdir=lib --buildtype=release .. && ninja && ninja install
+
+# openEuler's ld.so.conf does not list /usr/local/lib, so the freshly installed libs are invisible to ldd/exec.
+RUN <<-LD_SO_CONF
+echo '/usr/local/lib' > /etc/ld.so.conf.d/00-usrlib-local.conf
+ldconfig || true
+LD_SO_CONF
+
+# pugixml: a Kodi hard dependency that openEuler does not package (apt has libpugixml-dev).
+WORKDIR /src
+RUN <<-PUGIXML
+. /src/os-info.env
+[ "${PKG_FAMILY}" = "rpm" ] || { echo "Not openEuler: pugixml comes from apt"; exit 0; }
+git -c advice.detachedHead=false clone --depth 1 --single-branch https://github.com/zeux/pugixml.git pugixml
+cmake -S pugixml -B pugixml-build -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
+cmake --build pugixml-build -j"$(nproc)"
+cmake --install pugixml-build
+ldconfig || true
+PUGIXML
+
+# openEuler 24.03's mesa (24.0.3) ships no panfrost DRI driver, so Kodi GBM on a Rockchip board gets
+# llvmpipe and renders the whole UI in software (a 4K console pins a core and stutters). Debian/Ubuntu
+# mesa has panfrost, so only the rpm leg carries its own GL stack.
+# 24.3 and not 25.x: 25.2 moved panfrost onto the CLC precompiled-shader path, which wants SPIRV-Tools
+# >= 2024.1 while openEuler has 2023.2.1. Not 24.0.3 either, even though openEuler's own SRPM is that
+# version: the Panthor path this repo documents needs mesa >= 24.1, so a 24.0.3 rebuild would strand
+# RK3588 (Mali-G610). shared-llvm=disabled statically links LLVM, so the payload never needs
+# libLLVM.so.<ver> - the soname would differ on every distro this package is installed on.
+# The prefix is NOT /usr/local/lib: openEuler lists /usr/local/lib64 in /etc/ld.so.conf, so GL libraries
+# put there become a second libEGL.so.1 for every binary on the box. This is the same "glfallback"
+# design the sibling mpv line uses - a private directory that only kodi-gbm/ffmpeg reach through their
+# RUNPATH, and the prefix has to be the fallback dir itself because mesa bakes the DRI search path and
+# the gbm backend dir into the binaries at build time.
+ARG MESA_VERSION="24.3.4"
+ENV KODI_GL_PREFIX=/usr/local/share/kodi-rockchip/glfallback
+WORKDIR /src
+RUN <<-MESA
+. /src/os-info.env
+[ "${PKG_FAMILY}" = "rpm" ] || { echo "Not openEuler: distro mesa already ships panfrost"; exit 0; }
+wget -q "https://archive.mesa3d.org/mesa-${MESA_VERSION}.tar.xz"
+tar -xf "mesa-${MESA_VERSION}.tar.xz"
+cd "mesa-${MESA_VERSION}"
+meson setup build --prefix="${KODI_GL_PREFIX}" --libdir=lib --buildtype=release -Dplatforms= -Degl=enabled -Degl-native-platform=drm -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=false -Dgallium-drivers=panfrost,llvmpipe -Dvulkan-drivers= -Dglvnd=disabled -Dllvm=enabled -Dshared-llvm=disabled -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=enabled -Dxmlconfig=enabled -Dvideo-codecs= -Dgallium-va=disabled -Dgallium-vdpau=disabled -Dbuild-tests=false
+# Statically linked LLVM makes each gallium translation unit memory-hungry: an RK3576 board (3.9G) OOMs
+# at nproc parallelism and needs 4. Budget one job per GB of RAM, capped by the core count.
+MESA_JOBS="$(awk -v n="$(nproc)" '/MemTotal/{j=int($2/1048576); if (j<1) j=1; if (j<n) n=j; exit} END{print n}' /proc/meminfo)"
+echo "mesa parallelism: ${MESA_JOBS} jobs (of $(nproc) cores)"
+ninja -C build -j"${MESA_JOBS}"
+ninja -C build install
+# Mesa only creates the per-driver names (panfrost_dri.so, swrast_dri.so, ...) in
+# src/gallium/targets/dril, and src/meson.build adds that subdir only when with_glx=='dri' or the
+# x11/xcb platform is enabled. This build is GBM-only, so lay the megadriver out the way mesa did
+# before dril existed: dri/<driver>_dri.so -> ../libgallium-<ver>.so. GBM dlopen()s exactly those
+# names; with no dri/ directory Kodi binds no driver and is back on llvmpipe, which is the whole
+# reason this step exists. One link per name is enough - the megadriver picks the driver from the
+# device it gets bound to. Verified on an RK3576 board: GL_RENDERER flips to "Mali-G52 r1 (Panfrost)".
+GLLIB="${KODI_GL_PREFIX}/lib"
+mkdir -p "${GLLIB}/dri"
+for drv in panfrost swrast kms_swrast; do
+	ln -sf "../libgallium-${MESA_VERSION}.so" "${GLLIB}/dri/${drv}_dri.so"
+done
+
+# Gate: Kodi's GBM path needs EGL + GLES2 + GBM + the panfrost DRI driver in the fallback tree, and
+# nothing in that tree may reach for a distro LLVM (the soname changes with every target distro).
+# Match on the prefix, not the bare soname: mesa installs the versioned ELF (libEGL.so.1.0.0) and the
+# symlink layer is whatever its ABI policy happens to emit.
+for f in libEGL libGLESv2 libgbm; do
+	ls "${GLLIB}/${f}".so* > /dev/null 2>&1 || { echo "ERROR: mesa did not install ${f}.so*" >&2; exit 1; }
+done
+[ -e "${GLLIB}/dri/panfrost_dri.so" ] || { echo "ERROR: mesa did not lay out dri/panfrost_dri.so" >&2; exit 1; }
+# Enumerate regular files, not soname globs: mesa installs the ELF as libEGL.so.1.0.0 and leaves
+# libEGL.so.1 as a symlink, so patching "libEGL.so.1" would either be skipped (keeping the link) or
+# turn it into a copy - and the real library would ship without RUNPATH. The dri/<driver>_dri.so
+# entries are our own symlinks onto libgallium, which find -type f skips by design: patchelf writes
+# through a temp file + rename, so pointed at a symlink it replaces the link with a full 66MB copy.
+patched=0
+while IFS= read -r f; do
+	if readelf -d "${f}" | grep -qE "NEEDED +(libLLVM|libclc|libSPIRV)"; then
+		echo "ERROR: ${f} needs a distro LLVM/SPIRV lib: shared-llvm=disabled did not hold" >&2
+		exit 1
+	fi
+	# meson strips the build rpath on install, and the fallback dir is deliberately not in ld.so.conf,
+	# so the DRI/GBM drivers must find libgallium by RUNPATH once this tree is unpacked on a target.
+	patchelf --set-rpath "${GLLIB}" "${f}"
+	readelf -d "${f}" | grep -qF RUNPATH || { echo "ERROR: no RUNPATH on ${f}" >&2; exit 1; }
+	patched=$((patched + 1))
+done < <(find "${GLLIB}" -type f -name '*.so*' | sort)
+# EGL + GLESv2 + GBM + libgallium: fewer than four means the enumeration, not mesa, is broken.
+[ "${patched}" -ge 4 ] || { echo "ERROR: only ${patched} fallback libraries got a RUNPATH" >&2; exit 1; }
+# No ldconfig here on purpose: this tree must stay invisible to the system loader.
+ls -la "${GLLIB}/dri"; ls -la "${GLLIB}/gbm" 2> /dev/null || true
+MESA
 
 #### Flavor: rkmpp (vendor kernel)
 FROM base AS ffmpeg-rkmpp
@@ -117,9 +308,10 @@ RUN git -c advice.detachedHead=false clone -b jellyfin-mpp --depth=1 --single-br
 
 # RKMPP
 WORKDIR /src/rkmpp/rkmpp_build
-RUN cmake -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF .. && \
+RUN cmake -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF .. && \
     make -j$(nproc) && \
     make install
+RUN ldconfig || true
 
 # RKRGA
 WORKDIR /src
@@ -130,9 +322,19 @@ RUN meson setup rkrga rkrga_build --prefix=/usr/local --libdir=lib --buildtype=r
 # ffmpeg, with rkxxx stuff. Nyanmisaka's fork, full of boogie goodness. You folks rock.
 # Software decode: native h264/hevc/vp9 (default) + libdav1d for AV1. Hardware decode: rkmpp. SIMD asm (NEON) is on by default on aarch64.
 WORKDIR /src/ffmpeg
-RUN ./configure --prefix=/usr/local --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-libdav1d --enable-gnutls && \
-    make -j $(nproc) && \
-    make install
+RUN <<-FFMPEG_RKMPP
+. /src/os-info.env
+extra=""
+if [ "${PKG_FAMILY}" = "rpm" ]; then
+	# openEuler: shared libs + rpath, so the /usr/local libs stay resolvable without LD_LIBRARY_PATH on the board.
+	extra="--enable-shared --disable-static --enable-rpath"
+fi
+./configure --prefix=/usr/local ${extra} --enable-gpl --enable-version3 --enable-libdrm \
+	--enable-rkmpp --enable-rkrga --enable-libdav1d --enable-gnutls
+make -j "$(nproc)"
+make install
+ldconfig || true
+FFMPEG_RKMPP
 
 #### Flavor: v4l2requests (mainline kernel)
 FROM base AS ffmpeg-v4l2requests
@@ -146,7 +348,10 @@ ENV FLAVOR="v4l2requests" \
 
 # Lets ensure the libc/linux headers are recent enough for the stateless decoders we need, otherwise bail out fast.
 # Every check runs (so the log shows the full picture); the build aborts afterwards if any of them failed.
+# Aborting here matters: patch 0017 needs the HEVC-EXT controls at compile time, so an old-headers build dies
+# 40 minutes later inside ffmpeg with a wall of "undeclared" errors instead of a readable reason.
 RUN <<-HEADERS_CHECK
+. /src/os-info.env
 missing=0
 check() { # usage: check <label> <symbol that linux/videodev2.h must define>
     if printf '#include <linux/videodev2.h>\nint i = %s;\n' "$2" | gcc -x c -c - -o /dev/null 2>/dev/null; then
@@ -165,8 +370,17 @@ check HEVC-EXT V4L2_HEVC_EXT_SPS_ST_RPS_FLAG_INTER_REF_PIC_SET_PRED
 check VP9      V4L2_CID_STATELESS_VP9_FRAME
 check AV1      V4L2_CID_STATELESS_AV1_SEQUENCE
 
-[ "$missing" -eq 0 ] || { echo "ERROR: $missing V4L2 stateless symbol(s) missing; linux headers too old, aborting." >&2; exit 1; }
-echo "All V4L2 stateless decoder symbols present."
+[ "$missing" -eq 0 ] || {
+    echo "ERROR: $missing V4L2 stateless symbol(s) missing; linux headers too old, aborting." >&2
+    if [ "${PKG_FAMILY}" = "rpm" ]; then
+        echo "ERROR: ${OS_ID} ships kernel-headers 6.6, which predates the HEVC-EXT stateless uAPI that" >&2
+        echo "         patches/ffmpeg/v4l2requests/9.0.2/0017-*.patch is written against (needs >= 6.10)." >&2
+        echo "         openEuler targets the Rockchip vendor kernel: build the rkmpp flavor here, and use" >&2
+        echo "         the Debian/Ubuntu legs for mainline-kernel V4L2 decoding." >&2
+    fi
+    exit 1
+}
+echo "Required V4L2 stateless decoder symbols present."
 HEADERS_CHECK
 
 WORKDIR /src
@@ -176,24 +390,35 @@ RUN git -c advice.detachedHead=false clone -b "${FFMPEG_BRANCH}" --depth=1 --sin
 COPY patches/ffmpeg/v4l2requests /src/patches-ffmpeg/v4l2requests
 WORKDIR /src/ffmpeg
 RUN for p in /src/patches-ffmpeg/v4l2requests/"${FFMPEG_BRANCH#n}"/*.patch; do echo "Applying patch ${p} ..."; patch -p1 < "$p"; done
-RUN ./configure --prefix=/usr/local --enable-gpl --enable-version3 --enable-libdrm --enable-libdav1d --enable-v4l2_m2m --enable-gnutls && \
-    make -j $(nproc) && \
-    make install
+RUN <<-FFMPEG_V4L2
+. /src/os-info.env
+extra=""
+if [ "${PKG_FAMILY}" = "rpm" ]; then
+	# openEuler: shared libs + rpath, so the /usr/local libs stay resolvable without LD_LIBRARY_PATH on the board.
+	extra="--enable-shared --disable-static --enable-rpath"
+fi
+./configure --prefix=/usr/local ${extra} --enable-gpl --enable-version3 --enable-libdrm \
+	--enable-libdav1d --enable-v4l2_m2m --enable-gnutls
+make -j "$(nproc)"
+make install
+ldconfig || true
+FFMPEG_V4L2
 
 #### Flavor selection, plus checks common to both flavors
 FROM ffmpeg-${FLAVOR} AS ffmpeg
-RUN LD_LIBRARY_PATH=/usr/local/lib /usr/local/bin/ffmpeg -hide_banner -decoders | tee /tmp/decoders.txt && \
+# lib64 too: on openEuler some of the /usr/local libs land there.
+RUN LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64 /usr/local/bin/ffmpeg -hide_banner -decoders | tee /tmp/decoders.txt && \
     for d in ${FFMPEG_DECODERS}; do \
       grep -qw "$d" /tmp/decoders.txt || { echo "MISSING DECODER: $d"; exit 1; }; \
     done && \
     echo "All expected decoders present."
 # TLS (GnuTLS) is needed for https:// streams, eg. HLS .m3u8 over https.
-RUN LD_LIBRARY_PATH=/usr/local/lib /usr/local/bin/ffmpeg -hide_banner -protocols | tee /tmp/protocols.txt && \
+RUN LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64 /usr/local/bin/ffmpeg -hide_banner -protocols | tee /tmp/protocols.txt && \
     for p in https tls; do \
       grep -qw "$p" /tmp/protocols.txt || { echo "MISSING PROTOCOL: $p"; exit 1; }; \
     done && \
     echo "All expected protocols present."
-RUN { LD_LIBRARY_PATH=/usr/local/lib /usr/local/bin/ffmpeg -hide_banner -buildconf | grep -q -- '--disable-asm' && { echo "ERROR: ffmpeg asm disabled"; exit 1; }; } || echo "ffmpeg asm enabled."
+RUN { LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64 /usr/local/bin/ffmpeg -hide_banner -buildconf | grep -q -- '--disable-asm' && { echo "ERROR: ffmpeg asm disabled"; exit 1; }; } || echo "ffmpeg asm enabled."
 
 #### Kodi & packaging
 FROM ffmpeg AS packager
@@ -215,13 +440,33 @@ RUN for s in ${KODI_PATCH_SETS}; do for p in /src/patches-kodi/"${s}"/*.patch; d
 # PACKAGE_VERSION is declared only here, as any change to it invalidates the cache from this point on (Kodi build included).
 WORKDIR /src/kodi-build
 ARG PACKAGE_VERSION="20260513"
-RUN KODI_COMMIT="$(git -C ../kodi log -1 --date=format:%Y%m%d --format=%cd-%h)" && \
-    KODI_GIT_VERSION="${KODI_COMMIT}-${FLAVOR}-ffmpeg-${FFMPEG_BRANCH}-$(lsb_release -c -s)-build-${PACKAGE_VERSION}" && \
+RUN . /src/os-info.env && \
+    KODI_COMMIT="$(git -C ../kodi log -1 --date=format:%Y%m%d --format=%cd-%h)" && \
+    KODI_GIT_VERSION="${KODI_COMMIT}-${FLAVOR}-ffmpeg-${FFMPEG_BRANCH}-${OS_ID}-build-${PACKAGE_VERSION}" && \
     { [[ "${KODI_GIT_VERSION}" =~ ^[0-9]{8}-[0-9a-f]{7,}-[A-Za-z0-9._-]+$ ]] || { echo "ERROR: bad Kodi GIT_VERSION '${KODI_GIT_VERSION}'" >&2; exit 1; }; } && \
     echo "${KODI_GIT_VERSION}" | tee /src/kodi-git-version
-RUN cmake ../kodi -DCMAKE_INSTALL_PREFIX=/usr/local -DCORE_PLATFORM_NAME=gbm -DAPP_RENDER_SYSTEM=gles -DENABLE_INTERNAL_FMT=ON -DENABLE_INTERNAL_FLATBUFFERS=ON -DENABLE_INTERNAL_TAGLIB=ON -DENABLE_INTERNAL_SWIG=ON -DGIT_VERSION="$(< /src/kodi-git-version)" && \
-    cmake --build . -- -j$(nproc) || cmake --build . -- -j$(nproc) || cmake --build . -- -j$(nproc) && \
-    make install
+# openEuler extras (validated by build-kodi-rockchip-openeuler.sh, which this branch mirrors):
+#  - harfbuzz-devel ships a broken cmake config: find_package(HarfBuzz CONFIG) errors out instead of falling
+#    back to pkg-config, so drop it and let SEARCH_EXISTING_PACKAGES use harfbuzz.pc.
+#  - no -devel packages for fstrcmp/crossguid/shairplay/cwiid/cec/lirc/enca/pulseaudio, and gtest pulls in
+#    testing: internal builds where Kodi ships them, features off where it does not.
+RUN <<-KODI_BUILD
+. /src/os-info.env
+kodi_extra=""
+if [ "${PKG_FAMILY}" = "rpm" ]; then
+	rm -f /usr/lib64/cmake/harfbuzz/*.cmake /usr/lib/cmake/harfbuzz/*.cmake 2> /dev/null || true
+	kodi_extra="-DENABLE_INTERNAL_FSTRCMP=ON -DENABLE_INTERNAL_CROSSGUID=ON \
+		-DENABLE_AIRPLAY=OFF -DENABLE_WII=OFF -DENABLE_OPTICAL=OFF \
+		-DENABLE_CEC=OFF -DENABLE_LIRC=OFF -DENABLE_ENCA=OFF -DENABLE_PULSEAUDIO=OFF \
+		-DENABLE_TESTING=OFF -DCMAKE_PREFIX_PATH=/usr/local"
+fi
+cmake ../kodi -DCMAKE_INSTALL_PREFIX=/usr/local -DCORE_PLATFORM_NAME=gbm -DAPP_RENDER_SYSTEM=gles \
+	-DENABLE_INTERNAL_FMT=ON -DENABLE_INTERNAL_FLATBUFFERS=ON -DENABLE_INTERNAL_TAGLIB=ON -DENABLE_INTERNAL_SWIG=ON \
+	${kodi_extra} -DGIT_VERSION="$(< /src/kodi-git-version)"
+cmake --build . -- -j"$(nproc)" || cmake --build . -- -j"$(nproc)" || cmake --build . -- -j"$(nproc)"
+make install
+ldconfig || true
+KODI_BUILD
 
 # Lets build & install shadertoy visualization addon
 WORKDIR /src
@@ -242,9 +487,17 @@ RUN make -j$(nproc) || make -j$(nproc) || make
 # Lets build & install commonly-required binary addons; the official repo has no Linux binaries, and distro ones conflict with us.
 # Sources come from Kodi's repo-binary-addons definitions; the build downloads things, so retry it a few times.
 WORKDIR /src/binary-addons/build
-RUN cmake -DADDONS_TO_BUILD="vfs.rar vfs.libarchive inputstream.adaptive inputstream.rtmp peripheral.joystick pvr.iptvsimple" -DAPP_RENDER_SYSTEM=gles -DCMAKE_INSTALL_PREFIX=/usr/local/share/kodi/addons -DCMAKE_BUILD_TYPE=Release -DPACKAGE_ZIP=1 /src/kodi/cmake/addons
-RUN make -j$(nproc) || make -j$(nproc) || make
-RUN for a in vfs.rar vfs.libarchive inputstream.adaptive inputstream.rtmp peripheral.joystick pvr.iptvsimple; do ls -lah "/usr/local/share/kodi/addons/${a}" || exit 1; done
+# inputstream.rtmp needs librtmp, which openEuler does not ship: leave it out there so the batch does not fail
+# and take the remaining addons with it.
+RUN <<-BINARY_ADDONS
+. /src/os-info.env
+addons="vfs.rar vfs.libarchive inputstream.adaptive peripheral.joystick pvr.iptvsimple"
+[ "${PKG_FAMILY}" = "deb" ] && addons="vfs.rar vfs.libarchive inputstream.adaptive inputstream.rtmp peripheral.joystick pvr.iptvsimple"
+cmake /src/kodi/cmake/addons -DADDONS_TO_BUILD="${addons}" -DAPP_RENDER_SYSTEM=gles \
+	-DCMAKE_INSTALL_PREFIX=/usr/local/share/kodi/addons -DCMAKE_BUILD_TYPE=Release -DPACKAGE_ZIP=1
+make -j"$(nproc)" || make -j"$(nproc)" || make
+for a in ${addons}; do ls -lah "/usr/local/share/kodi/addons/${a}" || exit 1; done
+BINARY_ADDONS
 
 # Lets preinstall the Jellyfin Kodi repository add-on, just for convenience
 WORKDIR /usr/local/share/kodi/addons
@@ -257,15 +510,34 @@ RUN ls -lah /usr/local/share/kodi/addons /usr/local/share/kodi/addons/repository
 # ld.so.conf lists /usr/lib/<triplet> before /usr/local/lib, so eg. a distro libdav1d7 (pulled by any distro libavcodec)
 # or a PPA's librockchip-mpp1 would otherwise be picked at runtime instead of ours.
 RUN <<-SET_RUNPATH
-runpath="/usr/local/lib:/usr/local/lib/$(gcc -dumpmachine)"
-for elf in /usr/local/lib/kodi/kodi-gbm /usr/local/bin/ffmpeg /usr/local/bin/ffprobe; do
+runpath="/usr/local/lib:/usr/local/lib64:/usr/local/lib/$(gcc -dumpmachine)"
+# The openEuler leg only: its bundled mesa lives outside the loader search path, so RUNPATH is the one
+# and only thing that gets Kodi onto panfrost. It goes first so our EGL/GLES/GBM win over /usr/local/lib.
+if [ -d "${KODI_GL_PREFIX}/lib" ]; then
+	runpath="${KODI_GL_PREFIX}/lib:${runpath}"
+	echo "GL fallback found: ${KODI_GL_PREFIX}/lib"
+else
+	echo "No GL fallback in this tree (Debian/Ubuntu base, or mesa step skipped)"
+fi
+# Kodi's cmake ignores CMAKE_INSTALL_LIBDIR and lands kodi-gbm in /usr/local/lib64/kodi on lib64 distros.
+kodi_bin=""
+for cand in /usr/local/lib/kodi/kodi-gbm /usr/local/lib64/kodi/kodi-gbm; do
+	[ -f "${cand}" ] && { kodi_bin="${cand}"; break; }
+done
+[ -n "${kodi_bin}" ] || { echo "ERROR: kodi-gbm not found in /usr/local/lib or lib64" >&2; exit 1; }
+echo "kodi-gbm: ${kodi_bin}"
+for elf in "${kodi_bin}" /usr/local/bin/ffmpeg /usr/local/bin/ffprobe; do
 	[ -f "${elf}" ] || { echo "ERROR: ${elf} not found" >&2; exit 1; }
 	patchelf --set-rpath "${runpath}" "${elf}"
 	readelf -d "${elf}" | grep -F "RUNPATH" || { echo "ERROR: no RUNPATH on ${elf}" >&2; exit 1; }
+	if [ -d "${KODI_GL_PREFIX}/lib" ]; then
+		readelf -d "${elf}" | grep -F "RUNPATH" | grep -qF "${KODI_GL_PREFIX}/lib" ||
+			{ echo "ERROR: ${elf} RUNPATH misses the GL fallback, Kodi would render on llvmpipe" >&2; exit 1; }
+	fi
 done
 SET_RUNPATH
 
-### ------- packaging
+### ------- packaging (deb family: apt + debuild, unchanged from upstream)
 
 # Drop headers for now. We don't need them in the final package.
 WORKDIR /pkg/src/usr
@@ -274,8 +546,12 @@ RUN rm -rf /usr/local/include && cp -pr /usr/local /pkg/src/usr/
 # ffmpeg/ffprobe go to their own package (ffmpeg-kodi-rockchip-gbm); Kodi links FFmpeg statically and doesn't need them.
 # That package carries private copies of the /usr/local libs they link, in its own dir with a matching RUNPATH, so it
 # shares no paths with kodi-rockchip-gbm: both install together, or each alone.
+# rpm 家族（openEuler / deepin）不走这里：那条线是手工从同一棵 staging 树打包的，把 ffmpeg/ffprobe 从树里
+# 搬走等于直接夺走用户的命令行工具，所以那边的 Kodi 包继续自带 ffmpeg/ffprobe。
 RUN <<-STAGE_FFMPEG
 set -e
+. /src/os-info.env
+[ "${PKG_FAMILY}" = "deb" ] || { echo "rpm base: ffmpeg/ffprobe stay in the Kodi package"; exit 0; }
 d=/pkg/src/ffmpeg-pkg
 libdir=/usr/local/lib/ffmpeg-kodi-rockchip-gbm
 mkdir -p "${d}/usr/local/bin" "${d}${libdir}"
@@ -307,18 +583,20 @@ RUN echo "usr/*" > debian/kodi-rockchip-gbm.install && \
 
 # Render flavor/version-specific metadata (debian/control, debian/changelog, appliance.xml build info). ARGs here invalidate the cache.
 COPY packaging/render-metadata.sh /pkg/render-metadata.sh
+COPY packaging/build-openeuler-packages.sh /pkg/build-openeuler-packages.sh
 ARG OS_ARCH="arm64"
-RUN /pkg/render-metadata.sh /pkg/src && \
-    python3 -c "import xml.etree.ElementTree as ET; ET.parse('/pkg/src/usr/local/share/kodi/system/settings/appliance.xml')" && \
-    cat /pkg/src/debian/control /pkg/src/debian/changelog /pkg/src/usr/local/share/kodi/system/settings/appliance.xml
 
-# Build the package, don't sign it, don't lint it, compress fast with xz
-WORKDIR /pkg/src
-RUN debuild --no-lintian --build=binary -us -uc -Zxz -z1
-
-# Show package info; check the two packages share no files, and that they install together.
-RUN <<-CHECK_DEBS
+RUN <<-DEB_PACKAGE
 set -e
+. /src/os-info.env
+[ "${PKG_FAMILY}" = "deb" ] || { echo "openEuler base: taking the rpm packaging path instead"; exit 0; }
+/pkg/render-metadata.sh /pkg/src
+python3 -c "import xml.etree.ElementTree as ET; ET.parse('/pkg/src/usr/local/share/kodi/system/settings/appliance.xml')"
+cat /pkg/src/debian/control /pkg/src/debian/changelog /pkg/src/usr/local/share/kodi/system/settings/appliance.xml
+# Build the package, don't sign it, don't lint it, compress fast with xz
+cd /pkg/src
+debuild --no-lintian --build=binary -us -uc -Zxz -z1
+# Show package info; check the two packages share no files, and that they install together.
 for deb in /pkg/*.deb; do file "${deb}"; dpkg-deb -I "${deb}"; done
 dpkg-deb -c /pkg/kodi-rockchip-gbm_*.deb | awk '$1 !~ /^d/ {print $6}' | sort > /tmp/files-kodi
 dpkg-deb -c /pkg/ffmpeg-kodi-rockchip-gbm_*.deb | awk '$1 !~ /^d/ {print $6}' | sort > /tmp/files-ffmpeg
@@ -327,12 +605,25 @@ overlap="$(comm -12 /tmp/files-kodi /tmp/files-ffmpeg)"
 [ -z "${overlap}" ] || { echo "ERROR: files in both packages:" >&2; echo "${overlap}" >&2; exit 1; }
 apt-get install -y /pkg/*.deb
 /usr/local/bin/ffmpeg -hide_banner -version
-CHECK_DEBS
-
 # Now prepare the real output: the .debs for this release and arch.
-WORKDIR /artifacts
-RUN cp -v /pkg/kodi-rockchip-gbm_*.deb kodi-rockchip-gbm_${OS_ARCH}_kodi_${KODI_BRANCH}_ffmpeg_${FFMPEG_ID}_$(lsb_release -c -s).deb && \
-    cp -v /pkg/ffmpeg-kodi-rockchip-gbm_*.deb ffmpeg-kodi-rockchip-gbm_${OS_ARCH}_ffmpeg_${FFMPEG_ID}_$(lsb_release -c -s).deb
+mkdir -p /artifacts
+cd /artifacts
+cp -v /pkg/kodi-rockchip-gbm_*.deb "kodi-rockchip-gbm_${OS_ARCH}_kodi_${KODI_BRANCH}_ffmpeg_${FFMPEG_ID}_$(lsb_release -c -s).deb"
+cp -v /pkg/ffmpeg-kodi-rockchip-gbm_*.deb "ffmpeg-kodi-rockchip-gbm_${OS_ARCH}_ffmpeg_${FFMPEG_ID}_$(lsb_release -c -s).deb"
+DEB_PACKAGE
+
+# openEuler (rpm family): same staging tree, two package types out - a native .rpm for openEuler and a
+# cross-distro .deb (glibc >= 2.38) for deepin/Debian/Ubuntu, plus the ffmpeg-only pair. No debuild here:
+# this is not a Debian source package, and rpmbuild gets a prebuilt tree rather than a spec that compiles.
+RUN <<-RPM_PACKAGE
+. /src/os-info.env
+[ "${PKG_FAMILY}" = "rpm" ] || { echo "deb base: the rpm path is not needed"; exit 0; }
+mkdir -p /artifacts
+OS_ARCH="${OS_ARCH}" OS_ID="${OS_ID}" SRC_DIR=/src \
+FLAVOR="${FLAVOR}" FFMPEG_BRANCH="${FFMPEG_BRANCH}" FFMPEG_ID="${FFMPEG_ID}" \
+KODI_BRANCH="${KODI_BRANCH}" DAV1D_BRANCH="${DAV1D_BRANCH}" PACKAGE_VERSION="${PACKAGE_VERSION}" \
+	/pkg/build-openeuler-packages.sh /pkg/src /artifacts
+RPM_PACKAGE
 
 # An intermediate stage, which is just the base image + the installed built package.
 # Who wouldn't want to run Kodi in a container?
@@ -344,6 +635,9 @@ FROM ${BASE_IMAGE} AS containerized-kodi
 # re-use the apt cache from the build stage to avoid downloading stuff again.
 ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked --mount=type=cache,target=/var/lib/apt,sharing=locked  --mount=type=bind,from=packager,source=/artifacts,target=/debs <<-INSTALL_DEBS
+
+. /etc/os-release
+[ "${ID}" = "debian" ] || [ "${ID}" = "ubuntu" ] || { echo "openEuler base: installing the .rpm instead"; exit 0; }
 
 ls -laR  /etc/apt/apt.conf.d; for ja in /etc/apt/apt.conf.d/*; do echo "APT CONF.D ITEM: $ja"; cat "$ja"; done
 rm -rfv /etc/apt/apt.conf.d/docker-clean /etc/apt/apt.conf.d/docker-gzip-indexes
@@ -372,6 +666,22 @@ apt-get -y dist-upgrade
 apt-get -y install /debs/*.deb pulseaudio-utils ir-keytable libegl-mesa0 libgbm1 mesa-libgallium
 dpkg -l | grep -E 'mesa|libgbm' || true
 INSTALL_DEBS
+
+# Same idea for openEuler: base image + the built .rpm. The package's own Requires pull the mesa/alsa/X
+# runtime libs; the extras below are the audio and remote-control helpers, tolerated if a repo lacks them.
+RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked --mount=type=cache,target=/var/lib/dnf,sharing=locked --mount=type=bind,from=packager,source=/artifacts,target=/rpms <<-INSTALL_RPM
+
+. /etc/os-release
+[ "${ID}" = "openEuler" ] || exit 0
+
+dnf -y install /rpms/kodi-rockchip-gbm_*openeuler*.rpm
+for p in pulseaudio pulseaudio-utils ir-keytable; do
+	dnf -q list --available "$p" > /dev/null 2>&1 && dnf install -y "$p" > /dev/null 2>&1 && echo "  runtime $p installed" || echo "  [skip] runtime $p unavailable"
+done
+rpm -q kodi-rockchip-gbm
+rpm -ql kodi-rockchip-gbm | grep -E 'kodi-gbm$|systemd/system' | head
+ls -lah /usr/local/bin/ffmpeg /usr/local/lib*/kodi/kodi-gbm 2> /dev/null || true
+INSTALL_RPM
 
 # Final stage is just the output deb
 FROM scratch
